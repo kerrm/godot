@@ -3,10 +3,10 @@ Module implements a relatively feature-complete computation of the LAT
 exposure.  The purpose is primarily for fast computation of an exposure
 time series for a very limited patch of sky.
 
-Thus, while the Exposure class is quite functional, the meat of the
-module is 
+This was written for Pass 7 data and has been roughly kluged to work with
+Pass 8, at least commonly used event classes.
 
-$Header: /nfs/slac/g/glast/ground/cvs/users/kerrm/tools/py_exposure.py,v 1.7 2013/04/01 00:02:46 kerrm Exp $
+Requires: Fermi ScienceTools
 
 author(s): Matthew Kerr
 """

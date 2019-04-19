@@ -1213,13 +1213,10 @@ class Data(object):
                 np.radians(ra),np.radians(dec),
                 theta_cut=0.4,zenith_cut=np.cos(np.radians(zenith_cut)),
                 get_phi=use_phi)
-        print 'got cosines'
-        print len(pcosines)
         phi = np.arccos(acosines) if use_phi else None
         if use_weights_for_exposure:
             base_spectrum = None
         aeff,self.total_exposure_edom,self.total_exposure = self._get_weighted_aeff(pcosines,phi,base_spectrum)
-        print 'got aeff'
         exposure = np.zeros(len(mask))
         exposure[mask] = aeff*lt.LIVETIME[mask]
         # just get rid of any odd bins -- this cut corresponds to roughly
@@ -1238,14 +1235,12 @@ class Data(object):
                 ft1files,weight_col,self.TSTART[0],self.TSTOP[-1],
                 max_radius=max_radius)
         ti = data[0]
-        print 'got_data'
         if self.timeref=='SOLARSYSTEM':
             print 'WARNING!!!!  Barycentric data not accurately treated'
         
         # this is a problem if the data are barycentered
         event_idx = np.searchsorted(lt.STOP,ti)
-        event_mask = exposure[event_idx] > 0
-        print 'event mask',event_mask.sum()
+        event_mask = self.event_mask = exposure[event_idx] > 0
 
         data = [d[event_mask].copy() for d in data]
         self.ti = data[0]
@@ -1270,9 +1265,9 @@ class Data(object):
         event_idx = self.event_idx = np.searchsorted(self.TSTOP,self.ti)
 
         # NEEDED?
-        print 'beginning photon exposure'
-        self.photon_exposure = self.get_exposure(self.ti)
-        print 'ending photon exposure'
+        #print 'beginning photon exposure'
+        #self.photon_exposure = self.get_exposure(self.ti)
+        #print 'ending photon exposure'
 
         self.weight_cut = weight_cut
         if weight_cut < 1:
@@ -1569,7 +1564,9 @@ class Data(object):
 
             use_barycenter -- interpret tcell in barycenter frame, so
                 generate a set of nonuniform edges in the topocenter and
-                use this for binning/exposure calculation
+                use this for binning/exposure calculation; NB that in
+                general one would *not* use barycentered event times
+                in this case
 
             randomize -- shuffle times and weights so that they follow
                 the exposure but lose all time ordering; useful for
@@ -1601,11 +1598,9 @@ class Data(object):
             topo_knots = np.arange(
                     self.TSTART[0]-3600,self.TSTOP[-1]+3600+3*3600+1,
                     3*3600)
-            print topo_knots.min(),topo_knots.max()
-            print 'beginning barycenter'
+            print 'beginning barycenter for topocentric knots'
             bary_knots = topo_to_bary_converter(topo_knots)
-            print 'ending barycenter'
-            print bary_knots.min(),bary_knots.max()
+            print 'ending barycenter for topocentric knots'
             bary_to_topo_interpolator = interp1d(bary_knots,topo_knots)
 
         if tstart is None:
@@ -1647,9 +1642,6 @@ class Data(object):
         if use_barycenter:
             topo_edges = bary_to_topo_interpolator(edges)
             bary_edges = edges
-            # DEBUG
-            #self._bary_edges = edges
-            #self._topo_edges = topo_edges
         else:
             topo_edges = edges
 
@@ -1699,8 +1691,6 @@ class Data(object):
             weights = scale*weights/(scale*weights+(1-weights))
             W1 = weights.sum()
             Wb1 = (1-weights).sum()
-            print W0,W1,W0/W1
-            print Wb0,Wb1,Wb0/Wb1
             # adjust exposure
             idx = np.searchsorted(right_edges,stops)
             sexp = (exp * scales[idx])*(self.S/self.E)
@@ -2004,6 +1994,7 @@ def fit_harmonics(cll,freq):
     return camp,samp,ts
 
 def compute_ls(cll,freqs,unweighted=False):
+    """ Return Lomb-Scargle periodogram at the specified frequencies."""
     # form fluxes
     if unweighted:
         flux = np.asarray([len(c.we) for c in cll.cells],dtype=float)/cll.exp**0.5
@@ -2047,9 +2038,9 @@ def compute_ls(cll,freqs,unweighted=False):
 
 def power_spectrum_dft(cll,freqs,unweighted=False):
     """ Do a computation of the power spectrum using first-order likelihood
-        expansion on potentially un-even cell sizes.  This also allows arbitrary
-        frequencies (DFT).  But does make the approx. that the cosine/sine is 
-        constant within a cell like the FFT method.
+        expansion on potentially un-even cell sizes.  This also allows 
+        arbitrary frequencies (DFT).  But does make the approx. that the 
+        cosine/sine is constant within a cell like the FFT method.
     """
 
     ph_basis = (cll.tmids-cll.tmids[0])
@@ -2222,6 +2213,16 @@ def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
 
 def bb_prior_tune(data,tcell,bb_priors=[2,3,4,5,6,7,8,9,10],ntrial=10,
         orbital=False,**cell_kwargs):
+    """ Test a range of parameters for an exponential BB prior.
+    
+    Creating random realizations of the data and run BB algorithm.
+    Return values will essentially be the number of partitions for each
+    realizations as a function of the parameter value.  This information
+    can be used to select an appropriate prior for the real data.
+    
+    This is very expensive, so note that generally it works pretty well to
+    select exp(-gamma) = 1/n_cell.
+    """
 
     rvals = np.empty((len(bb_priors),ntrial),dtype=int)
     for itrial in xrange(ntrial):
@@ -2246,6 +2247,8 @@ def bb_prior_tune(data,tcell,bb_priors=[2,3,4,5,6,7,8,9,10],ntrial=10,
     return rvals,len(cells)
 
 def plot_bb_prior_results(rvals):
+    """ Make a "nice" plot of the result of the output of bb_prior_tune.
+    """
     rvals = rvals.astype(int)
     minlength = max(rvals.max()+1,50)
     blah = np.asarray([np.bincount(rvals[i],minlength=minlength) for i in xrange(rvals.shape[0])])

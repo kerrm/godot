@@ -159,9 +159,13 @@ def get_spectrum(tc,ts,ce,se,th0,th1,nharm=40,
     return dlogl
 
 def get_spectrum_slice(i0,i1,tc,ts,ce,se,th0,th1,nharm=40):
-    """ Return spectrum in a limited slice.  Arguably it would be best to do
+    """ Return spectrum in a limited frequency slice.  
+    
+        Arguably it would be best to do
         this for a whole raft of coefficients since we wouldn't be memory
-        limits.
+        limited.
+
+        Automatically fits for best alpha.
 
         i0 = starting index
         i1 = stopping index (inclusive)
@@ -169,6 +173,8 @@ def get_spectrum_slice(i0,i1,tc,ts,ce,se,th0,th1,nharm=40):
         ts = sin_amps*sin_err
         ce = cos_err
         se = sin_err
+        th0 = notch starting phase
+        th1 = notch ending phase
     """
 
     freqs = np.arange(1,nharm+1)*(2*np.pi)
@@ -203,6 +209,8 @@ def get_alpha(i0,i1,tc,ts,ce,se,th0,th1,nharm=40):
         ts = sin_amps*sin_err
         ce = cos_err
         se = sin_err
+        th0 = notch starting phase
+        th1 = notch ending phase
     """
 
     freqs = np.arange(1,nharm+1)*(2*np.pi)
@@ -253,14 +261,17 @@ def scan_grid_slice(i0,i1,tc,ts,ce,se,nharm=40,dw=0.01,dphi=0.01):
             rvals[iw,ip] = logls.max()
     return rvals
 
-def scan_grid_slice_adapt(i0,i1,tc,ts,ce,se,nharm=40):
+def scan_grid_slice_adapt(i0,i1,tc,ts,ce,se,nharm=40,fix_phase=None):
     width_grid = np.logspace(-2,-0.3,51)
     #width_grid = np.arange(0.01,0.51,0.02)
     widths = deque()
     phases = deque()
     rlogls = deque()
     for iw,w in enumerate(width_grid):
-        phase_grid = np.arange(0,1,0.1*w)
+        if fix_phase is not None:
+            phase_grid = [fix_phase]
+        else:
+            phase_grid = np.arange(0,1,0.1*w)
         for ip,p in enumerate(phase_grid):
             logls = get_spectrum_slice(i0,i1,tc,ts,ce,se,p,p+w,nharm=nharm)
             rlogls.append(logls)

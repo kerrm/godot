@@ -1,3 +1,4 @@
+TODO: revise this so "make figure" plots actually follow paper notation.
 import core; reload(core)
 from core import mjd2met,met2mjd
 #from examples import get_data
@@ -826,7 +827,7 @@ def make_cygx3_plot(fignum=13):
     # disable upper limits -- want best estimates of flux density
     r1,r2 = clls.plot_cells_bb(bb_prior=8,tsmin=-1,ax=ax1)
     ax1.axis([54450,58750,-1,30])
-    ax1.set_ylabel("Relative Flux Density / Power")
+    ax1.set_ylabel("Relative Flux / Power")
 
     left_edges = r2[:,0]-r2[:,1]
     right_edges = r2[:,0]+r2[:,1]
