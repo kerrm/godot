@@ -1241,6 +1241,7 @@ class Data(object):
         # this is a problem if the data are barycentered
         event_idx = np.searchsorted(lt.STOP,ti)
         event_mask = self.event_mask = exposure[event_idx] > 0
+        event_mask &= lt.get_gti_mask(ti)
 
         data = [d[event_mask].copy() for d in data]
         self.ti = data[0]
@@ -1608,14 +1609,18 @@ class Data(object):
         if tstart < 100000:
             tstart = mjd2met(tstart)
         if tstart < self.TSTART[0]:
-            raise ValueError('Start time precedes start of exposure!')
+            print 'Warning: Start time precedes start of exposure.'
+            print 'Will clip to MET=%.2f.'%(self.TSTART[0])
+            tstart = self.TSTART[0]
 
         if tstop is None:
             tstop = self.TSTOP[-1]
         if tstop < 100000:
             tstop = mjd2met(tstop)
         if tstop > self.TSTOP[-1]:
-            raise ValueError('Stop time exceeds stop of exposure!')
+            print 'Warning: Stop time follows end of exposure.'
+            print 'Will clip to MET=%.2f.'%(self.TSTOP[-1])
+            tstop = self.TSTOP[-1]
 
         if scale_series is not None:
             # make scale_series consistent with start and stop time
@@ -1655,16 +1660,26 @@ class Data(object):
                 starts,stops = bary_edges[:-1],bary_edges[1:]
             else:
                 starts,stops = topo_edges[:-1],topo_edges[1:]
-        if trim_zero_exposure:
-            m = exp > 0
-            starts = starts[m]
-            stops = stops[m]
-            exp = exp[m]
-        else:
-            m = slice(0,len(starts))
+
+        # trim off any events that come outside of first/last cell
         istart,istop = np.searchsorted(self.ti,[starts[0],stops[-1]])
         times = self.ti[istart:istop]
         weights = self.we[istart:istop]
+
+
+        if trim_zero_exposure:
+            exposure_mask = exp > 0
+            # need to remove events that will lie outside of cells after
+            # exposure cut
+            event_mask = exposure_mask[np.searchsorted(stops,times)]
+            times = times[event_mask]
+            weights = weights[event_mask]
+            starts = starts[exposure_mask]
+            stops = stops[exposure_mask]
+            exp = exp[exposure_mask]
+        else:
+            exposure_mask = slice(0,len(starts))
+
         if randomize:
             cexp = np.cumsum(exp)
             cexp /= cexp[-1]
@@ -1675,6 +1690,7 @@ class Data(object):
             event_idx = indices[a]
         else:
             event_idx = np.searchsorted(stops,times)
+
         nweights = np.bincount(event_idx,minlength=len(starts))
         print 'nweights=',nweights.sum()
 
@@ -1713,7 +1729,8 @@ class Data(object):
         # correct (uniform) barycentric times;
         if use_barycenter and (not ft1_is_bary):
             # replace starts/stops with barycenter times
-            starts,stops = bary_edges[:-1][m],bary_edges[1:][m]
+            starts = bary_edges[:-1][exposure_mask]
+            stops = bary_edges[1:][exposure_mask]
 
         if time_series_only:
             weights_vec = np.zeros(len(starts),dtype=float)
@@ -1730,7 +1747,8 @@ class Data(object):
                 return CellTimeSeries(
                     starts,stops,exp,sexp,bexp,
                     nweights,weights_vec,weights2_vec,
-                    alt_starts=topo_edges[:-1][m],alt_stops=topo_edges[1:][m],
+                    alt_starts=topo_edges[:-1][exposure_mask],
+                    alt_stops=topo_edges[1:][exposure_mask],
                     timesys='barycenter',minimum_exposure=0)
             else:
                 return CellTimeSeries(
@@ -2288,3 +2306,19 @@ def get_orbital_modulation(ts,freqs):
         pows[i] = (a**2/a2 + b**2/b2)
 
     return rvals,pows*ts.sexp.sum()**2/ts.sexp.shape[0]
+
+def plot_clls_lc(rvals,ax=None,scale='linear',
+        ul_color='C1',meas_color='C0'):
+    """ Make a plot of the output lc CellsLogLikelihood.get_lightcurve.
+    """
+    if ax is None:
+        ax = pl.gca()
+    ax.set_yscale(scale)
+    ul_mask = (rvals[:,-1] == -1) & (~np.isnan(rvals[:,-1]))
+    t = rvals[ul_mask].transpose()
+    ax.errorbar(t[0],t[2],xerr=t[1],yerr=0.2*(1 if scale=='linear' else t[2]),uplims=True,marker=None,color=ul_color,alpha=0.5,ls=' ',ms=3)
+    t = rvals[~ul_mask].transpose()
+    ax.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',color=meas_color,alpha=0.5,ls=' ',ms=3)
+    ax.set_xlabel('MJD')
+    ax.set_ylabel('Relative Flux')
+

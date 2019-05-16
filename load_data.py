@@ -4,6 +4,50 @@ from astropy.io import fits
 
 data_path = '/data/kerrm/photon_data'
 
+def get_position_from_ft1(ft1file):
+
+    f = fits.open(ft1file)
+    for i in xrange(10):
+        key = 'DSVAL%d'%(i+1)
+        try:
+            ra,dec,rad = f[1]._header[key].lstrip('CIRCLE(').rstrip(')').split(',')
+            return float(ra),float(dec),rad
+        except:
+            continue
+    raise ValueError('FT1 file does not seem to contain an aperture!')
+
+
+def load_ft1file(source,ft1file,weightcol,clobber=False,do_pickle=True,
+        ft2file=None,**data_kwargs):
+
+    if not clobber:
+        try:
+            data = cPickle.load(file('%s_data.pickle'%source))
+            print 'returning cached version of Data object'
+            return data
+        except:
+            pass
+
+    ra,dec,rad = get_position_from_ft1(ft1file)
+    print 'Using ra = %s, dec = %s, with extraction radius %s'%(ra,dec,rad)
+
+    if ('max_radius' in data_kwargs) and (float(rad) < data_kwargs['max_radius']):
+        print 'Warning, specified max_radius=%s but data cuts imply %s.'%(data_kwargs['max_radius'],rad)
+
+    if ft2file is None:
+        ft2files = ['%s/ft2.fits'%data_path]
+    else:
+        ft2files = [ft2file]
+
+    spectrum = lambda E: (E/1000)**-2.1
+    data = core.Data([ft1file],ft2files,ra,dec,weightcol,
+            base_spectrum=spectrum,zenith_cut=100,**data_kwargs)
+    if do_pickle:
+        cPickle.dump(data,file('%s_data.pickle'%source,'wb'),protocol=2)
+    return data
+
+
+
 def get_data(source,clobber=False,do_pickle=True,**data_kwargs):
 
     if 'use_phi' not in data_kwargs:
@@ -90,17 +134,8 @@ def get_data(source,clobber=False,do_pickle=True,**data_kwargs):
     spectrum = lambda E: (E/1000)**-2.1
     ft1files = ['%s/%s_%s.fits'%(data_path,jname,'bary' if 'bary' in source else 'topo')]
 
-    # load position from FT1 file
-    f = fits.open(ft1files[0])
-    try:
-        ra,dec,rad = f[1]._header['DSVAL2'].lstrip('CIRCLE(').rstrip(')').split(',')
-    except:
-        ra,dec,rad = f[1]._header['DSVAL1'].lstrip('CIRCLE(').rstrip(')').split(',')
-
+    ra,dec,rad = get_position_from_ft1(ft1files[0])
     print 'Using ra = %s, dec = %s, with extraction radius %s'%(ra,dec,rad)
-    ra = float(ra)
-    dec = float(dec)
-    f.close()
 
     if ('max_radius' in data_kwargs) and (float(rad) < data_kwargs['max_radius']):
         print 'Warning, specified max_radius=%s but data cuts imply %s.'%(data_kwargs['max_radius'],rad)

@@ -122,30 +122,67 @@ class Livetime(object):
                     round(gti.computeOntime()))
 
     def _update_gti(self):
-        """ Trim GTI to FT2 boundaries."""
-        return
-        # just a slow implementation to knock this out; can do with
-        # searchsorted later...
-        mask = np.ones(len(self.gti_stops),dtype=bool)
-        for i,(gstart,gstop) in enumerate(zip(self.gti_starts,self.gti_stops)):
-            if gstop < self.START[0]:
-                mask[i] = False
-                continue
-            if gstart < self.START[0]:
-                self.gti_starts[i] = self.START[0]
-            break
-        print 'discarding %d GTI from beginning'%i
-        for i,(gstart,gstop) in enumerate(zip(self.gti_starts[::-1],self.gti_stops[::-1])):
-            if gstart > self.STOP[-1]:
-                mask[-i] = False
-                continue
-            if gstop > self.STOP[-1]:
-                self.gti_stops[-i] = self.STOP[-1]
-            break
-        print 'discarding %d GTI from from end'%i
-        print self.gti_starts[-1],self.gti_stops[-1]
-        self.gti_starts = self.gti_starts[mask]
-        self.gti_stops = self.gti_stops[mask]
+        """ Trim GTI to FT2 boundaries.
+        This is a sanity check, essentially, on GTI, to make sure they
+        are consistent with the contents of the FT2 file.  This should
+        normally be the case, but if the FT2 file is missing data, the GTI
+        should be updated to avoid including data without S/C pointing
+        history.
+
+        Subsequently, event data should be masked according to the times.
+        """
+        # The easiest way to do this is to identify gaps in the FT2 file.
+        # These are typically *exactly* the same as the GTI already defined
+        # in the FT2 file, with two exceptions: when the FT2 file doesn't
+        # extend to the same length as the FT1 file(s), or when the FT2
+        # file has missing coverage.  The former is benign, while the
+        # latter indicates a problem with the input files.
+
+        # May 15, 2019 -- TODO; this code is on the right track, but to
+        # cover all cases, need to consider the case that a GTI could have
+        # multiple gaps within it.  (What's coded below allowed for multi
+        # GTI per gap.)  So leave the sanity check, but don't actually
+        # change any GTI for now.
+        
+        gap_idx = np.ravel(np.argwhere((self.START[1:]-self.STOP[:-1]) > 0))
+        gap_starts = self.STOP[gap_idx]
+        gap_stops = self.START[gap_idx+1]
+
+        g0 = self.gti_starts
+        g1 = self.gti_stops
+
+        i0 = np.searchsorted(gap_stops-1e-6,g0)
+        np.clip(i0,0,len(gap_stops)-1,out=i0)
+        starts_in_gap = (g0 > gap_starts[i0]) & (i0 < len(gap_stops)-1)
+
+        i1 = np.searchsorted(gap_stops+1e-6,g1)
+        np.clip(i1,0,len(gap_stops)-1,out=i1)
+        ends_in_gap = (g1 > gap_starts[i1]) & (i1 < len(gap_stops)-1)
+
+        if np.any(starts_in_gap | ends_in_gap):
+            print """"WARNING!!!
+            
+            GTI are present with no spacecraft pointing information!  
+            This likely represents a problem with the input file. 
+            This algorithm will attempt to compute the exposure correctly
+            by adjusting the GTI, but you will need to apply the resulting
+            mask to the events directly.
+            """
+
+            print g0[starts_in_gap]
+
+        # adjust all GTI to gap boundaries
+        g0[starts_in_gap] = gap_stops[i0[starts_in_gap]]
+        g1[ends_in_gap] = gap_starts[i1[ends_in_gap]]
+
+        # finally, adjust all GTI that precede or follow the FT2 file
+        g0[g1 < self.START[0]] = self.START[0]
+        g1[g0 > self.STOP[-1]] = self.STOP[-1]
+
+        # remove any GTI that now have negative length
+        mask = (g1-g0) > 0
+        self.gti_starts = g0[mask]
+        self.gti_stops = g1[mask]
 
     def _setup_ft2(self,ft2files):
         """Load in the FT2 data.  Optionally, mask out values that will not
@@ -154,7 +191,6 @@ class Livetime(object):
         if not hasattr(ft2files,'__iter__'): ft2files = [ft2files]
         handles = [fits.open(ft2,memmap=False) for ft2 in ft2files]
         ft2lens = [handle['SC_DATA'].data.shape[0] for handle in handles]
-        print ft2lens
         fields  = self.fields
         arrays  = [np.empty(sum(ft2lens)) for i in xrange(len(fields))]
         
@@ -181,11 +217,11 @@ class Livetime(object):
             self.gti = self.gti.applyTimeRangeCut(self.START[0],self.STOP[-1])
             self.gti_starts = np.sort(self.gti.get_edges(True))
             self.gti_stops = np.sort(self.gti.get_edges(False))
+            mask = (self.STOP > self.gti_starts[0]) | (self.START < self.gti_stops[-1])
+            self.mask_entries(mask)
         if self.remove_zeros:
-            if self.verbose >= 1:
-                print 'Pruning values that yield 0 exposure...'
-            mask = (self.LIVETIME > 0) | (self.STOP > self.gti_starts[0]) | (self.START < self.gti_stops[-1])
-            self.mask_entries()
+            mask = self.LIVETIME > 0
+            self.mask_entries(mask)
 
         # ensure entries are sorted by time
         self.mask_entries(np.argsort(self.START)) 
@@ -196,6 +232,13 @@ class Livetime(object):
         func = self._process_ft2_fast if self.fast_ft2 else \
                self._process_ft2_slow
         overlaps = func(self.gti_starts,self.gti_stops)
+        # sanity check code on overlaps
+        if np.any(overlaps > 1):
+            print('Error in overlap calculation!  Results may be unreliable.')
+            overlaps[overlaps>1] = 1
+        # TEMPORARY
+        self._overlaps = overlaps.copy()
+        # END TEMPORARY
         mask = overlaps > 0
         if self.remove_zeros:
             self.mask_entries(mask)
@@ -222,6 +265,13 @@ class Livetime(object):
         """Calculate the fraction of each FT2 interval lying within the GTI.
            Use binary search to quickly process the FT2 file.
            The complexity is O(t*log(t))."""
+        # Development notes: one bug results from GTIs that reside partially
+        # or completely outside of regions of validity in the FT2.  I have
+        # implemented a fix that trims GTI ranges to the edges of the FT2
+        # boundaries when this arises, but I am not 100% sure this is
+        # correct.  I have also implemented some sanity checks elsewhere
+        # in the code, but at some point it would be good to verify this
+        # implementation.  May 15, 2019
         t1,t2,lt = self.START,self.STOP,self.LIVETIME
         gti_t1,gti_t2 = gti_starts,gti_stops
         overlaps = np.zeros_like(lt)
@@ -233,10 +283,19 @@ class Livetime(object):
             if seps[i] > 0: # correct the endpoint FT2 intervals
                 overlaps[ii1] = (t2[ii1] - gti_t1[i])/(t2[ii1] - t1[ii1])
                 overlaps[ii2] = (gti_t2[i] - t1[ii2])/(t2[ii2] - t1[ii2])
+                # May 15, 2019; above implementation can lead to incorrect
+                # results if the GTI lies outside of the range of validity
+                # of an FT2 file, which can now apparently happen.  Trimming
+                # the GTI to the FT2 validity is equivalent, in this case,
+                # to capping the overlaps at 1, so simply do that as an
+                # array operation at the end of the computation.
             else: # edge case with exceptionally short GTI
                 a = max(t1[ii1],gti_t1[i])
                 b = min(t2[ii1],gti_t2[i])
                 overlaps[ii1] = max(b-a,0)/(t2[ii1] - t1[ii1])
+        # May 15, 2019 -- below array operation MAY account for GTIs lying
+        # outside of FT2 START/STOP ranges
+        np.clip(overlaps,0,1,out=overlaps)
         return overlaps
 
     def mask_entries(self,mask=None):
@@ -308,6 +367,16 @@ class Livetime(object):
             self.prev_val = [self._do_bin(binning,mask,pcosines,acosines,time_range=[t0,t1])
                 for t0,t1 in zip(binning.time_bins[:-1],binning.time_bins[1:])]
         return self.prev_val
+
+    def get_gti_mask(self,timestamps):
+        """ Return a mask with the same shape as timestamps according to
+            whether the timestamps lie within a GTI.
+        """
+        event_idx = np.searchsorted(self.gti_stops,timestamps)
+        mask = event_idx < len(self.gti_stops)
+        mask[mask] = timestamps > self.gti_starts[event_idx[mask]]
+        print 'gti mask: %d/%d'%(mask.sum(),len(mask))
+        return mask
 
 class BinnedLivetime(Livetime):
     """See remarks for Livetime class for general information.

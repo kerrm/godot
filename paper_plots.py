@@ -1,4 +1,4 @@
-TODO: revise this so "make figure" plots actually follow paper notation.
+#TODO: revise this so "make figure" plots actually follow paper notation.
 import core; reload(core)
 from core import mjd2met,met2mjd
 #from examples import get_data
@@ -153,14 +153,6 @@ def make_3c279_plot(data=None,fignum=2,clobber=False):
     ax3.set_ylabel('Relative Flux')
 
 
-def plot_rvals(rvals,ax,scale='linear'):
-    ax.set_yscale(scale)
-    ul_mask = (rvals[:,-1] == -1) & (~np.isnan(rvals[:,-1]))
-    t = rvals[ul_mask].transpose()
-    ax.errorbar(t[0],t[2],xerr=t[1],yerr=0.2*(1 if scale=='linear' else t[2]),uplims=True,marker=None,color='C1',alpha=0.5,ls=' ',ms=3)
-    t = rvals[~ul_mask].transpose()
-    ax.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',color='C0',alpha=0.5,ls=' ',ms=3)
-
 def make_3c279_plot_first(ax=None,profile_background=False):
 
     tstart = tstop = None
@@ -176,18 +168,18 @@ def make_3c279_plot_first(ax=None,profile_background=False):
 
     rvals_1d = clls_1d.get_lightcurve(tsmin=9)
 
-    a = np.argmin(np.abs(np.asarray([cll.cell.get_tmid() for cll in clls_1d.clls])-core.mjd2met(56576.6)))
+    a = np.argmin(np.abs(np.asarray([cll.cell.get_tmid() for cll in clls_1d.clls])-mjd2met(56576.6)))
     t = clls_1d.clls[a].get_flux(profile_background=profile_background)
     print 'Flux/TS of solar flare:',t[0],t[1]
 
     if ax is None:
         pl.figure(1); pl.clf()
         ax = pl.gca()
-    plot_rvals(rvals_1d,ax,scale='log')
+    core.plot_clls_lc(rvals_1d,ax,scale='log')
 
 def make_geminga_plot_first(data=None,ax=None):
     if data is None:
-        data = get_data('j0633')
+        data = get_data('j0633',clobber=False)
     cells_1d =  data.get_cells(tcell=86400,use_barycenter=False)
     clls_1d = core.CellsLogLikelihood(cells_1d,profile_background=False)
 
@@ -197,7 +189,7 @@ def make_geminga_plot_first(data=None,ax=None):
         pl.figure(1); pl.clf()
         ax = pl.gca()
     #ax.set_yscale('log')
-    plot_rvals(rvals_1d,ax,scale='log')
+    core.plot_clls_lc(rvals_1d,ax,scale='log')
 
 def make_geminga_plot_second(data=None,ax=None):
     if data is None:
@@ -212,7 +204,7 @@ def make_geminga_plot_second(data=None,ax=None):
         pl.figure(1); pl.clf()
         ax = pl.gca()
     #ax.set_yscale('log')
-    plot_rvals(rvals_1d,ax)
+    core.plot_clls_lc(rvals_1d,ax)
 
 
 def make_j2021_plot(data=None,profile_background=False):
@@ -501,17 +493,17 @@ def make_figure_5(ntrial=100,fignum=5):
     data = get_data('3c279',clobber=False)
 
     rvals1 = core.bb_prior_tune(data,None,orbital=True,ntrial=ntrial,
-            tstart=core.mjd2met(57185),tstop=core.mjd2met(57193),
+            tstart=mjd2met(57185),tstop=mjd2met(57193),
             bb_priors=bb_priors)
 
     rvals2 = core.bb_prior_tune(data,86400*7,ntrial=ntrial,
-            tstart=core.mjd2met(56000),tstop=core.mjd2met(56000 + 7*147),
+            tstart=mjd2met(56000),tstop=mjd2met(56000 + 7*147),
             use_barycenter=False,bb_priors=bb_priors)
 
     data = get_data('j1231_topo',clobber=False)
 
     rvals3 = core.bb_prior_tune(data,86400*7,ntrial=ntrial,
-            tstart=core.mjd2met(56000),tstop=core.mjd2met(56000 + 7*147),
+            tstart=mjd2met(56000),tstop=mjd2met(56000 + 7*147),
             use_barycenter=False,bb_priors=bb_priors)
 
     x = np.asarray(bb_priors)
