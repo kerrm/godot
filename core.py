@@ -269,13 +269,12 @@ class CellLogLikelihood(object):
         alpha -= 1
         beta -= 1
         S,B = self.S,self.B
-        t1,t2 = self._tmp1,self._tmp2
-        np.multiply(self.we,alpha-beta,out=t1)
-        np.add(1+beta,t1,out=t1)
+        t1 = np.multiply(self.we,alpha-beta,out=self._tmp1)
+        t1 += 1+beta
         # above equivalent to
         # t1[:] = 1+beta*iw+alpha*self.we
-        np.log(t1,out=t2)
-        logl = np.sum(t2) - S*(1+alpha) -B*(1+beta)
+        t2 = np.log(t1,out=self._tmp2)
+        logl = np.sum(t2) - S*alpha -B*beta
         np.divide(self.we,t1,out=t2)
         grad_alpha = np.sum(t2)-S
         np.divide(self.iwe,t1,out=t2)
@@ -380,12 +379,35 @@ class CellLogLikelihood(object):
                 #guess = self.get_max(profile_background=False)
             #if beta == 1:
                 #beta = self.get_beta_max(guess)
+            # NB -- removed the scale below as it seemed to work better
+            # without it.  In other words, the scale is already ~1!
             # test TNC method
             rvals,nfeval,rc = fmin_tnc(self.fmin_tnc_func,[guess,beta],
-                    scale=[0.1,0.01],
                     bounds=[[0,None],[0,None]],disp=0,ftol=1e-3)
-            if (rc < 0) or (rc > 2):
-                print 'Warning, best guess probably wrong.'
+            # this is one possible way to check for inconsistency in max
+            #if (guess == 1) and (rvals[0] > 10):
+                #rvals,nfeval,rc = fmin_tnc(self.fmin_tnc_func,
+                        #[rvals[0],beta],
+                        #bounds=[[0,None],[0,None]],disp=0,ftol=1e-3)
+
+            if not((rc < 0) or (rc > 2)):
+                if (guess == 0) and (rvals[0] > 5e-2):
+                    print 'Warning, possible inconsistency.  Guess was 0, best fit value %.5g.'%(rvals[0]),'beta=',beta
+                return rvals
+
+            # try a small grid to seed a search
+            grid = np.asarray([0,0.1,0.3,0.5,1.0,2.0,5.0,10.0])
+            cogrid = np.asarray([self.log_profile_likelihood(x) for x in grid])
+            newguess = grid[np.argmax(cogrid)]
+            newbeta = max(0.1,self.get_beta_max(newguess))
+
+            rvals,nfeval,rc = fmin_tnc(self.fmin_tnc_func,
+                    [newguess,newbeta],
+                    bounds=[[0,None],[0,None]],disp=0,ftol=1e-3)
+            if not((rc < 0) or (rc > 2)):
+                return rvals
+            else:
+                print 'Warning, trouble locating maximum with profile_background!  Results for this interval may be unreliable.'
             return rvals
 
         w = self.we
@@ -490,7 +512,7 @@ class CellLogLikelihood(object):
 
         a0 = -1
         amax = guess
-        for i in xrange(8):
+        for i in xrange(12):
             if f(amax) < 0:
                 break
             a0 = amax
@@ -692,13 +714,14 @@ class CellLogLikelihood(object):
         cod = np.empty_like(dom)
         for ia,a in enumerate(dom):
             cod[ia] = self.log_likelihood(a) 
-        ## do a sanity check here
-        #acodmax = np.argmax(cod)
-        #codmax = cod[acodmax]
-        #if codmax > llmax:
-            #aopt = self.get_max(guess=dom[acodmax])
-            #return self.get_logpdf(aopt=aopt,dlogl=dlogl,npt=npt,
-                    #include_zero=include_zero)
+
+        # do a sanity check here
+        acodmax = np.argmax(cod)
+        codmax = cod[acodmax]
+        if abs(codmax - llmax) > 0.05:
+            aopt = dom[acodmax]
+            return self.get_logpdf(aopt=aopt,dlogl=dlogl,npt=npt,
+                    include_zero=include_zero)
 
         cod -= llmax
         return dom,cod
@@ -769,8 +792,20 @@ class CellLogLikelihood(object):
         aopt = self.get_max(profile_background=profile_background)
         if profile_background:
             aopt = aopt[0]
+        dom,cod = self.get_pdf(aopt=aopt,
+                profile_background=profile_background)
+        amax = np.argmax(cod)
+        func = self.log_profile_likelihood if profile_background else self.log_likelihood
+        if abs(dom[amax]-aopt) > 0.1: # somewhat ad hoc
+            # re-optimize
+            aopt = self.get_max(guess=dom[amax],
+                    profile_background=profile_background)
+            if profile_background:
+                aopt = aopt[0]
+            if abs(dom[amax]-aopt) > 0.1: # somewhat ad hoc
+                print 'failed to obtain agreement, using internal version'
+                aopt = dom[amax]
         ts = self.get_ts(aopt=aopt,profile_background=profile_background)
-        dom,cod = self.get_pdf(aopt=aopt,profile_background=profile_background)
         cdf = cumtrapz(cod,dom,initial=0)
         cdf *= 1./cdf[-1]
         indices = np.searchsorted(cdf,conf)
@@ -968,8 +1003,19 @@ class CellsLogLikelihood(object):
 
     def get_flux(self,idx,conf=[0.05,0.95]):
 
-        aopt = self.clls[idx].get_max(
+        aguess = self._dom[idx][np.argmax(self._cod[idx])]
+        if self.profile_background:
+            bguess = self.clls[idx].get_beta_max(aguess)
+        else:
+            bguess = 1
+        aopt = self.clls[idx].get_max(guess=aguess,beta=bguess,
                 profile_background=self.profile_background)
+        ## sanity check that aopt is close to the guess.  If not, it is
+        ## wrong or else we extracted the domain/codomain incorrectly.
+        #if abs(aopt[0]-aguess) > 0.1:
+            #print aopt,aguess
+            #print 'Warning! refinement of aguess failed.  Using internal version.'
+
         if self.profile_background:
             aopt = aopt[0]
         ts = self.clls[idx].get_ts(aopt=aopt,
@@ -1006,7 +1052,8 @@ class CellsLogLikelihood(object):
         else:
             return sum((cll.log_likelihood(a) for cll,a in zip(self.clls,alpha)))
 
-    def get_lightcurve(self,tsmin=4,plot_years=False,plot_phase=False):
+    def get_lightcurve(self,tsmin=4,plot_years=False,plot_phase=False,
+            get_ts=False):
         """ Return a flux density light curve for the raw cells.
         """
 
@@ -1014,6 +1061,7 @@ class CellsLogLikelihood(object):
 
         # time, terr, yval, yerrlo,yerrhi; yerrhi=-1 if upper limit
         rvals = np.empty([len(self.clls),5])
+        all_ts = np.empty(len(self.clls))
         for icll,cll in enumerate(self.clls):
             if cll.S==0:
                 rvals[icll] = np.nan
@@ -1027,11 +1075,15 @@ class CellsLogLikelihood(object):
                     tmid = (tmid-54832)/365 + 2009 
                     terr *= 1./365
             aopt,ts,xconf = self.get_flux(icll,conf=[0.16,0.84])
-            if ts <= tsmin:
+            ul = ts <= tsmin
+            if ul:
                 rvals[icll] = tmid,terr,xconf[1],0,-1
             else:
                 rvals[icll] = tmid,terr,aopt,aopt-xconf[0],xconf[1]-aopt
+            all_ts[icll] = ts
 
+        if get_ts:
+            return rvals,all_ts
         return rvals
 
     def plot_cells_bb(self,tsmin=4,fignum=2,clear=True,color='C3',
@@ -1196,6 +1248,8 @@ class Data(object):
             max_radius -- maximum photon separation from source [deg]
             bary_ft1files -- an optional mirrored set of FT1 files with
                 photon timestamps in the barycentric reference frame
+            tstart, tstop -- notionally MET, but will attempt to convert
+                from MJD if < 100,000.
 
         Generally, the times for everything should be topocentric.
         However, if there is a need to search for short period signals,
@@ -1207,6 +1261,14 @@ class Data(object):
         self.ft2files = ft2files
         self.max_radius = max_radius
         self.ra,self.dec = ra,dec
+
+        if tstart is not None:
+            if tstart < 100000:
+                tstart = mjd2met(tstart)
+        if tstop is not None:
+            if tstop < 100000:
+                tstop = mjd2met(tstop)
+        
         lt = py_exposure_p8.Livetime(ft2files,ft1files,
                 tstart=tstart,tstop=tstop)
         mask,pcosines,acosines = lt.get_cosines(
@@ -1240,6 +1302,7 @@ class Data(object):
         
         # this is a problem if the data are barycentered
         event_idx = np.searchsorted(lt.STOP,ti)
+        # TODO add a check for FT2 files that are shorter than observation
         event_mask = self.event_mask = exposure[event_idx] > 0
         event_mask &= lt.get_gti_mask(ti)
 
@@ -1549,7 +1612,8 @@ class Data(object):
             snap_edges_to_exposure=False,trim_zero_exposure=True,
             time_series_only=False,use_barycenter=True,
             randomize=False,scale=None,
-            scale_series=None,minimum_exposure=3e4):
+            scale_series=None,minimum_exposure=3e4,
+            minimum_fractional_exposure=0):
         """ Return the starts, stops, exposures, and photon data between
             tstart and tstop.  If tcell is specified, bin data into cells
             of length tcell (s).  Otherwise, return photon-based cells.
@@ -1584,6 +1648,12 @@ class Data(object):
                 tcell/30.  Only applied if time_series_only.
                 [To be confirmed: possibly also just set to 0.  I don't
                 see why we would necessarily want to add another cut here.]
+
+            minimum_fractional_exposure -- reject cells whose exposure
+                is less than this fraction of the mean exposure of all of
+                the cells.  Only valid when tcell is specified.  Use with
+                care if using short (e.g. <1d) tcell, as the intrinsic
+                exposure variation becomes large.
 
             TODO -- implement a "use FT2 cells" feature, and a "use orbits"
             feature
@@ -1651,6 +1721,7 @@ class Data(object):
             topo_edges = edges
 
         # always use topocentric times to manage the exposure calculation
+        self._topo_edges = topo_edges.copy()
         cexp = self.get_exposure(topo_edges)
         exp = (cexp[1:] - cexp[:-1])
         if snap_edges_to_exposure:
@@ -1666,6 +1737,9 @@ class Data(object):
         times = self.ti[istart:istop]
         weights = self.we[istart:istop]
 
+        if minimum_fractional_exposure > 0:
+            frac_exp = exp/exp[exp>0].mean()
+            exp[frac_exp < minimum_fractional_exposure] = 0
 
         if trim_zero_exposure:
             exposure_mask = exp > 0
@@ -1681,6 +1755,8 @@ class Data(object):
             exposure_mask = slice(0,len(starts))
 
         if randomize:
+            # NOT SURE how consistent this is with e.g.
+            # minimum_fractional exposure, use with care
             cexp = np.cumsum(exp)
             cexp /= cexp[-1]
             indices = np.searchsorted(cexp,np.random.rand(len(times)))
@@ -1693,6 +1769,7 @@ class Data(object):
 
         nweights = np.bincount(event_idx,minlength=len(starts))
         print 'nweights=',nweights.sum()
+        self._exp = exp.copy()
 
         # rescale the weights
         if scale_series is not None:
@@ -2307,10 +2384,16 @@ def get_orbital_modulation(ts,freqs):
 
     return rvals,pows*ts.sexp.sum()**2/ts.sexp.shape[0]
 
-def plot_clls_lc(rvals,ax=None,scale='linear',
+def plot_clls_lc(rvals,ax=None,scale='linear',min_mjd=None,max_mjd=None,
         ul_color='C1',meas_color='C0'):
     """ Make a plot of the output lc CellsLogLikelihood.get_lightcurve.
     """
+    if min_mjd is not None:
+        mask = rvals[:,0] >= min_mjd
+        rvals = rvals[mask,:]
+    if max_mjd is not None:
+        mask = rvals[:,0] <= max_mjd
+        rvals = rvals[mask,:]
     if ax is None:
         ax = pl.gca()
     ax.set_yscale(scale)
