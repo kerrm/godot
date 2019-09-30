@@ -15,7 +15,7 @@ from astropy.io import fits
 from math import sin,cos
 from uw.like import pycaldb
 from uw.utilities import keyword_options
-from skymaps import Gti,Band,Healpix,SkyDir
+from skymaps import Gti,Healpix,SkyDir
 import skymaps
 from os.path import join
 import os
