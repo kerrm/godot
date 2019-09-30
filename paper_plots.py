@@ -5,7 +5,8 @@ from core import mjd2met,met2mjd
 from load_data import get_data
 import pylab as pl
 import numpy as np
-from scipy.stats import chi2
+from scipy.stats import chi2,norm
+import cPickle
 
 def set_rcParams(ticklabelsize='medium',bigticks=False):
     import matplotlib
@@ -56,6 +57,7 @@ def make_3c279_plot(data=None,fignum=2,clobber=False):
             tstart=mjd2met(tstart),tstop=mjd2met(tstop))
     print '%d cells in the orbital time series'%(len(cells_orb))
     clls_orb = core.CellsLogLikelihood(cells_orb,profile_background=False)
+    #return clls_orb
     cells_1d =  data.get_cells(tcell=86400,use_barycenter=False,
             tstart=mjd2met(tstart),tstop=mjd2met(tstop))
     clls_1d = core.CellsLogLikelihood(cells_1d,profile_background=False)
@@ -92,17 +94,17 @@ def make_3c279_plot(data=None,fignum=2,clobber=False):
 
     ax2 = pl.subplot(3,1,2)
 
-    # plot the 1-d values as blue points
+    # plot the 1-d values as green points
     ul_mask = (rvals_1d[:,-1] == -1) & (~np.isnan(rvals_1d[:,-1]))
     t = rvals_1d[ul_mask].transpose()
     ax2.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C0',alpha=0.3,ls=' ',ms=5)
     t = rvals_1d[~ul_mask].transpose()
-    ax2.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='s',color='C0',alpha=0.8,ls=' ',ms=5)
+    ax2.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='s',color='C2',alpha=0.7,ls=' ',ms=5)
 
     # plot the BB orbital values as red points
     ul_mask = (rvalsbb_orb[:,-1] == -1) & (~np.isnan(rvalsbb_orb[:,-1]))
     t = rvalsbb_orb[ul_mask].transpose()
-    ax2.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C3',alpha=0.8,ls=' ',ms=3)
+    ax2.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C3',alpha=0.7,ls=' ',ms=3)
     t = rvalsbb_orb[~ul_mask].transpose()
     ax2.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',color='C3',alpha=0.8,ls=' ',ms=3)
     #ax2.set_xlabel('MJD')
@@ -139,13 +141,33 @@ def make_3c279_plot(data=None,fignum=2,clobber=False):
     dom = np.linspace(tstart,tstop,1001)
 
     # these parameters come from fmin (see examples.py)
-    pfinal = [2.05182844e+00,   5.71877020e+04,   3.00763371e+01,
-              3.87152169e-01,   5.71884231e+04,   2.47303709e+01,
-              1.04508244e-01,   5.71892509e+04,   4.65444009e+01,
-              4.01144696e-01,   5.71890940e+04,   3.09453926e+01,
-              2.99894899e-02]
+    #pfinal = [2.05182844e+00,   5.71877020e+04,   3.00763371e+01,
+              #3.87152169e-01,   5.71884231e+04,   2.47303709e+01,
+              #1.04508244e-01,   5.71892509e+04,   4.65444009e+01,
+              #4.01144696e-01,   5.71890940e+04,   3.09453926e+01,
+              #2.99894899e-02]
+    pfinal_4g = [2.76309735e+00,
+                 5.71877033e+04, 3.82619900e+01, 3.88680894e-01,
+                 5.71884225e+04, 3.09655050e+01, 1.02169003e-01,
+                 5.71892461e+04, 5.92759520e+01, 4.03390602e-01, 
+                 5.71890981e+04, 3.85870110e+01, 2.47029769e-02]
+    # logl = -6940.18
 
-    ax3.plot(dom,waveform_model(pfinal,dom),color='C2')
+
+    pfinal_3g = [2.81823729e+00,
+                 5.71876967e+04, 3.80334078e+01, 3.82110083e-01,
+                 5.71884149e+04, 2.97091591e+01, 9.71476655e-02,
+                 5.71892111e+04, 6.39105951e+01, 4.01600420e-01]
+    # logl = -6920.28
+
+
+
+
+
+    ax3.plot(dom,waveform_model(pfinal_3g,dom),ls='-',color='C2',lw=2,
+            alpha=0.9)
+    ax3.plot(dom,waveform_model(pfinal_4g,dom),ls='-',color='C1',lw=2,
+            alpha=0.9)
 
     ax3.set_xlabel('MJD')
     ax3.set_yticks([0,20,40,60,80])
@@ -177,19 +199,43 @@ def make_3c279_plot_first(ax=None,profile_background=False):
         ax = pl.gca()
     core.plot_clls_lc(rvals_1d,ax,scale='log')
 
-def make_geminga_plot_first(data=None,ax=None):
+def make_geminga_plot_first(data=None,ax=None,pulls_ax=None):
+#data = None; ax = None
     if data is None:
         data = get_data('j0633',clobber=False)
-    cells_1d =  data.get_cells(tcell=86400,use_barycenter=False)
+    cells_1d =  data.get_cells(tcell=86400,use_barycenter=False,
+            minimum_fractional_exposure=0.1)
     clls_1d = core.CellsLogLikelihood(cells_1d,profile_background=False)
 
     rvals_1d = clls_1d.get_lightcurve(tsmin=9)
 
     if ax is None:
         pl.figure(1); pl.clf()
-        ax = pl.gca()
+        pl.subplots_adjust(hspace=0,bottom=0.12,left=0.10,right=0.98,top=0.98)
+        ax = pl.subplot(1,1,1)
     #ax.set_yscale('log')
-    core.plot_clls_lc(rvals_1d,ax,scale='log')
+    core.plot_clls_lc(rvals_1d,ax,scale='linear')
+    #return clls_1d,rvals_1d
+
+    if pulls_ax is None:
+        return
+    pulls_ax.clear()
+    pl.subplots_adjust(hspace=0,bottom=0.12,left=0.10,right=0.98,top=0.98)
+    # this plot isn't in the paper, but a pull hist that might go in...
+    y = rvals_1d[:,2]
+    ye = np.where(y<1,rvals_1d[:,4],rvals_1d[:,3])
+    #ye = (rvals_1d[:,3]+rvals_1d[:,4])*0.5
+    ul = rvals_1d[:,-1] == -1
+    pulls = ((y-1)/ye)[~ul]
+    print np.abs(pulls).max(),len(pulls)
+    pulls_ax.hist(pulls,histtype='step',bins=np.linspace(-5,5,51),density=True,lw=2);
+    dom = np.linspace(-5,5,1001)
+    pulls_ax.plot(dom,norm.pdf(dom))
+    pulls_ax.set_xlabel('Normalized Error')
+    pulls_ax.set_yscale('log')
+    #pulls_ax.set_ylabel('Normalized Error')
+    pulls_ax.axis([-5,5,1e-6,1])
+
 
 def make_geminga_plot_second(data=None,ax=None):
     if data is None:
@@ -351,15 +397,93 @@ def make_figure_1(fignum=1):
     #ax3.axis([54600,58300,5e-2,80])
     ax3.axis([56400,56900,5e-2,80])
 
+def make_new_3c279_figure(fignum=1):
+    """ Make version with six panels showing with and without the bkg
+        estimator.  For the revised version of the paper.
+    """
+    tstart = tstop = None
+    profile_background = False
+    fignum=2
+    #if profile_background:
+    #    tstart = core.mjd2met(56400)
+    #    tstop = core.mjd2met(56900)
+
+    data = get_data('3c279',clobber=False)
+    cells_1d =  data.get_cells(tcell=86400,use_barycenter=False,
+            tstart=tstart,tstop=tstop,minimum_fractional_exposure=0.3)
+    clls_1d = core.CellsLogLikelihood(cells_1d,
+            profile_background=profile_background)
+
+    clls_1dp = core.CellsLogLikelihood(cells_1d,
+            profile_background=True)
+
+    rvals_1d,allts = clls_1d.get_lightcurve(tsmin=9,get_ts=True)
+    rvals_1dp,alltsp = clls_1dp.get_lightcurve(tsmin=9,get_ts=True)
+
+    a = np.argmin(np.abs(np.asarray([cll.cell.get_tmid() for cll in clls_1d.clls])-mjd2met(56576.6)))
+    t = clls_1d.clls[a].get_flux(profile_background=profile_background)
+    print 'Flux/TS of solar flare:',t[0],t[1]
+
+    pl.close(fignum)
+    pl.figure(fignum,(8,4.5)); pl.clf()
+    pl.subplots_adjust(hspace=0.00,left=0.10,right=0.99,top=0.98,wspace=0.00,bottom=0.12)
+    # TODO -- labels are wrong for inhomogeneous scales... blah.
+    # TODO -- see if we can fix the "Warning, best guess" problems in core.
+    for i in xrange(6):
+        ax = pl.subplot(2,3,i+1)
+        if i < 3:
+            rvals = rvals_1d
+        else:
+            rvals = rvals_1dp
+        if (i == 0) or (i == 3):
+            core.plot_clls_lc(rvals,ax,scale='log')
+        elif (i == 1) or (i == 4):
+            core.plot_clls_lc(rvals,ax,scale='log',
+                    min_mjd=54750-1,max_mjd=55450+1)
+        else:
+            core.plot_clls_lc(rvals,ax,scale='log',
+                    min_mjd=56550-1,max_mjd=57250+1)
+        # turn off extra tick labels
+        if i%3 != 0:
+            ax.set_ylabel('')
+            ax.tick_params(axis='y',labelleft=False,right=False)
+        #if i == 1 or i == 4:
+            ## turn off y ticks
+            #ax.tick_params(axis='y',left=False,right=False)
+        if i < 3:
+            # turn off x ticks and labels
+            ax.tick_params(axis='x',top=True,bottom=False,direction='in')
+        else:
+            ax.tick_params(axis='x',top=False,bottom=True,direction='out')
+        #if i == 2 or i == 5:
+            ## put y ticks on right side, no labels
+            #ax.tick_params(axis='y',right=True,left=False,labelright=False)
+        #if (i == 2) or (i == 4):
+            #ax.tick_params(axis='y',right=True,which='both',direction='in')
+
+        if (i == 1) or (i == 4):
+            #ax.axis([54750,55450,0.1,10])
+            ax.axis([54750,55450,0.1,100])
+            ax.set_xticks(np.arange(1,4)*175+54750)
+        if (i==2) or (i==5):
+            ax.axis([56550,57250,0.1,100])
+            ax.set_xticks(np.arange(1,4)*175+56550)
+            if (i==2):
+                ax.set_xticklabels(['']*len(ax.get_xticks()))
+            ax.plot([56576.5],[4.63],'o',fillstyle='none',markersize=10,color='C3',ls='--')
+            # NB TS = 342
+    return allts,alltsp
+
+
 def make_figure_2(fignum=2):
     make_3c279_plot()
     pl.savefig('fig2.pdf')
 
 
-def make_figure_3(fignum=3):
+def make_figure_3(fignum=3,add_inset=False):
 
-    data = core.PhaseData(['data/J0633+1746_topo.fits'],'PSRJ0633+1746',
-            pulse_phase_col='PULSE_PHASE',phase_shift=0.05)
+    data = core.PhaseData(['/data/kerrm/photon_data/J0633+1746_topo.fits'],
+            'PSRJ0633+1746',pulse_phase_col='PULSE_PHASE',phase_shift=0.05)
 
     cells_100 = data.get_cells(100)
     cells_1000 = data.get_cells(1000)
@@ -396,6 +520,9 @@ def make_figure_3(fignum=3):
     ax1.set_xticks(np.linspace(0,1,6))
     ax1.set_xlabel('Pulse Phase')
     ax1.set_ylabel('Relative Flux')
+
+    if not add_inset:
+        return
 
     ax2 = pl.axes([0.28,0.75,0.30,0.20])
 
@@ -558,43 +685,103 @@ def make_j1018_plot(fignum=6):
     #ax1.axvline(1./53,ymin=0.9,color='C3')
 
 def make_geminga_power_spectrum(fignum=7):
+    # NOTES
+    # relative to an earlier data set stopping at 58183, the power in the
+    # fixed-background at 1 year is a bit higher, and the power in the free-
+    # background at 53 d is much higher (34 vs. 23).  I thought this was
+    # due to the addition of post-SADA failure data and the much less
+    # homogeneous exposure variation, but I think it is actually due to a
+    # problem with the weights in one of the pointlike sky models, with the
+    # isotropic background not properly weighted.
+    # under investigation as of 8/14/2019
+
+    # for the purposes of fixing up the plots, switch to an older pickle,
+    # but remember to make this all consistent at the end!
 
     data = get_data('j0633',clobber=False)
+    #data = cPickle.load(file('J0633+1746_data.pickle'))
     ts = data.get_cells(tcell=300,time_series_only=True,
             trim_zero_exposure=False,use_barycenter=True)
     f,window = core.power_spectrum_fft(ts,exp_only=True)
     f,dlogl_nobg,dlogl,dlogl_null = core.power_spectrum_fft(ts)
 
+
+    pl.close(fignum); pl.figure(fignum,(4,4))
+    pl.subplots_adjust(hspace=0.05,left=0.18,right=0.97,top=0.97,
+            wspace=0.28,bottom=0.14)
+    ax1 = pl.subplot(1,1,1)
+
+    dlogl_s = np.sort(dlogl[1:])
+    dlogl_nobg_s = np.sort(dlogl_nobg[1:])
+    cdf = np.arange(1,len(dlogl_s)+1).astype(float)/len(dlogl_s)
+    ax1.plot(dlogl_s,len(dlogl_s)**0.5*(cdf-chi2.cdf(dlogl_s,2)),color='C0')
+    ax1.plot(dlogl_nobg_s,len(dlogl_s)**0.5*(cdf-chi2.cdf(dlogl_nobg_s,2)),color='C1')
+    from scipy.stats import kstwobign
+    bound = kstwobign.isf(0.10)#/len(dlogl_s)**0.5
+    ax1.axhline(bound,color='k',alpha=0.5,ls='--')
+    ax1.axhline(-bound,color='k',alpha=0.5,ls='--')
+    bound = kstwobign.isf(0.01)#/len(dlogl_s)**0.5
+    ax1.axhline(bound,color='k',alpha=0.5,ls='-.')
+    ax1.axhline(-bound,color='k',alpha=0.5,ls='-.')
+    #ax1.axis([0,40,1e-8,1])
+    ax1.set_xlabel('Power')
+    ax1.set_ylabel(r'$\sqrt{N}\times[EDF-\Phi(x)]$')
+    ax1.axis([0,40,-2.5,2.5])
+
+    fignum += 1
     pl.close(fignum)
     pl.figure(fignum,(8,4)); pl.clf()
-    pl.subplots_adjust(hspace=0.05,left=0.09,right=0.97,top=0.97,wspace=0.28,bottom=0.18)
-
-    ax1 = pl.subplot(1,2,2)
-    ax1.set_yscale('log')
-
-    #mask = f > 1./86400
-    mask = np.ones(len(f),dtype=bool)
-    ax1.hist(dlogl_nobg[mask],histtype='step',bins=np.linspace(0,50,101),
-            normed=True,color='C1')
-    ax1.hist(dlogl[mask],histtype='step',bins=np.linspace(0,50,101),
-            normed=True,color='C0')
-    dom = np.linspace(0,50,1001)
-    ax1.plot(dom,chi2.pdf(dom,2),color='k')
-    ax1.axis([0,40,1e-8,1])
-    ax1.set_xlabel('Power')
-    ax1.set_ylabel('Probability Density')
-    
+    pl.subplots_adjust(hspace=0.04,left=0.07,right=0.97,top=0.97,
+            wspace=0.28,bottom=0.15)
 
     #mask = ~mask
     ax2 = pl.subplot(1,2,1)
-    ax2.plot(f[mask]*86400,dlogl[mask],alpha=0.5,color='C0')
-    ax2.plot(f[mask]*86400,dlogl_nobg[mask],alpha=0.5,color='C1')
-    ax2.set_xlabel('Frequency (cycles/day)')
+    ybound = 40
+    mask = np.ones(len(dlogl),dtype=bool)
+    #ax2.plot(f[mask]*86400,dlogl[mask],alpha=0.5,color='C0')
+    #ax2.plot(f[mask]*86400,dlogl_nobg[mask],alpha=0.5,color='C1')
+    ax2.plot(f[mask]*86400,dlogl[mask],alpha=0.8,color='C0')
+    ax2.plot(f[mask]*86400,-dlogl_nobg[mask],alpha=0.8,color='C1')
+    ax2.set_xlabel('Frequency (cycles d$^{-1}$)')
     ax2.set_ylabel('Power')
-    ax2.axis([0,72,0,50])
+    ax2.axis([0,72,-ybound,ybound])
     f0 = 1./(95.45*60)
-    scale = 45./window[np.abs(f-f0)<4e-7].max()
-    ax2.plot(f*86400,scale*window,color='k',alpha=0.3)
+    scale = 35./window[np.abs(f-f0)<4e-7].max()
+    ax2.plot(f*86400,scale*window,color='k',alpha=0.5)
+    ax2.plot(f*86400,-scale*window,color='k',alpha=0.5)
+    yticks = ax2.get_yticks()
+    ax2.set_yticklabels(np.abs(ax2.get_yticks()).astype(int))
+
+    #mask = ~mask
+    ax2 = pl.subplot(1,2,2)
+    mask = f < 0.1
+    #ax2.plot(f[mask]*86400,dlogl[mask],alpha=0.5,color='C0')
+    #ax2.plot(f[mask]*86400,dlogl_nobg[mask],alpha=0.5,color='C1')
+    ax2.plot(f[mask]*86400,dlogl[mask],alpha=0.8,color='C0')
+    ax2.plot(f[mask]*86400,-dlogl_nobg[mask],alpha=0.8,color='C1')
+    ax2.set_xlabel('Frequency (cycles d$^{-1}$)')
+    ax2.set_ylabel('Power')
+    ax2.axis([0,0.05,-ybound,ybound])
+    f0 = 1./(95.45*60)
+    scale = 35./window[np.abs(f-f0)<4e-7].max()
+    ax2.plot(f*86400,scale*window,color='k',alpha=0.5)
+    ax2.plot(f*86400,-scale*window,color='k',alpha=0.5)
+
+    f_yr = 1./365
+    f_prec = 1./53.5
+    width = (ax2.axis()[1]-ax2.axis()[0])*0.01
+    ax2.arrow(f_yr,ybound,0,-3,width=width,head_length=2,
+            fc='k',ec='k',overhang=0.3)
+    ax2.arrow(f_yr,-ybound,0,3,width=width,head_length=2,
+            fc='k',ec='k',overhang=0.3)
+    ax2.arrow(f_prec,ybound,0,-3,width=width,head_length=2,
+            fc='k',ec='k',overhang=0.3)
+    ax2.arrow(f_prec,-ybound,0,3,width=width,head_length=2,
+            fc='k',ec='k',overhang=0.3)
+    yticks = ax2.get_yticks()
+    ax2.set_yticklabels(np.abs(ax2.get_yticks()).astype(int))
+
+    return
 
     ia = pl.axes([0.20,0.675,0.26,0.28])
     mask = f < 0.1
@@ -616,16 +803,25 @@ def make_j0823_power_spectrum(fignum=8):
 
     pl.close(fignum)
     pl.figure(fignum,(4,4)); pl.clf()
-    pl.subplots_adjust(hspace=0,bottom=0.16,top=0.98,left=0.18,right=0.96)
+    pl.subplots_adjust(hspace=0,bottom=0.15,top=0.99,left=0.14,right=0.95)
 
     ax1 = pl.subplot(1,1,1)
     mask = f < 1./86400
-    ax1.plot(f[mask]*86400,dlogl[mask],alpha=0.5)
-    ax1.plot(f[mask]*86400,dlogl_nobg[mask],alpha=0.5)
-    ax1.set_xlabel('Frequency (cycles/day)')
+    ax1.plot(f[mask]*86400,dlogl[mask],alpha=0.8)#,ls=' ',marker='.')
+    ax1.plot(f[mask]*86400,-dlogl_nobg[mask],alpha=0.8)#,ls=' ',marker='.')
+    ax1.set_xlabel('Frequency (cycles d$^{-1}$)')
     ax1.set_ylabel('Power')
-    ax1.axis([0,0.05,0,40])
+    ax1.axis([0,0.10,-45,45])
+    f_psf = 4./365
+    width = (ax1.axis()[1]-ax1.axis()[0])*0.01
+    ax1.arrow(f_psf,45,0,-3,width=width,head_length=2,
+            fc='k',ec='k',overhang=0.3)
+    ax1.arrow(f_psf,-45,0,3,width=width,head_length=2,
+            fc='k',ec='k',overhang=0.3)
+    yticks = ax1.get_yticks()
+    ax1.set_yticklabels(np.abs(ax1.get_yticks()).astype(int))
 
+    """
     ia = pl.axes([0.46,0.54,0.42,0.42])
     ia.plot(f*86400,dlogl,alpha=0.5)
     ia.plot(f*86400,dlogl_nobg,alpha=0.5)
@@ -635,6 +831,9 @@ def make_j0823_power_spectrum(fignum=8):
     ia.plot(f,window*scale,color='k',alpha=0.3)
     ia.axis([0,72,0,40])
     ia.set_yticklabels('')
+    """
+
+    pl.sca(ax1)
 
 def make_j1018_power_spectrum(fignum=9):
 
@@ -650,7 +849,7 @@ def make_j1018_power_spectrum(fignum=9):
     ax1 = pl.subplot(1,1,1)
     ax1.plot(f*86400,dlogl,alpha=0.5)
     ax1.plot(f*86400,dlogl_nobg,alpha=0.5)
-    ax1.set_xlabel('Frequency (cycles/day)')
+    ax1.set_xlabel('Frequency (cycles d$^{-1}$)')
     ax1.set_ylabel('Power')
     ax1.axis([0,72,0,300])
 
@@ -681,7 +880,7 @@ def make_3c279_power_spectrum(fignum=7):
     ax1 = pl.subplot(1,1,1)
     ax1.plot(f*86400,dlogl,alpha=0.5)
     ax1.plot(f*86400,dlogl_nobg,alpha=0.5)
-    ax1.set_xlabel('Frequency (cycles/day)')
+    ax1.set_xlabel('Frequency (cycles d$^{-1}$)')
     ax1.set_ylabel('Power')
     ax1.axis([0,72,0,500])
 
@@ -707,10 +906,11 @@ def make_ls5039_power_spectrum(fignum=10):
     f,window = core.power_spectrum_fft(ts,exp_only=True)
     scale = 50./40000
     f,dlogl_nobg,dlogl,dlogl_null = core.power_spectrum_fft(ts)
+    fday = f*86400
 
     forb = 2.963145573933919e-06
     fprec = 2.1777777777777778e-07
-    freqs = [fprec,forb,2*forb]
+    freqs = np.asarray([fprec,forb,2*forb])
     corr,pows = core.get_orbital_modulation(ts,freqs)
     f2,dlogl_nobg2,dlogl2,dlogl_null2 = core.power_spectrum_fft(ts,
             exposure_correction=corr)
@@ -724,39 +924,99 @@ def make_ls5039_power_spectrum(fignum=10):
     pl.figure(fignum,(8,4)); pl.clf()
     pl.subplots_adjust(hspace=0,bottom=0.16,top=0.97,left=0.10,right=0.97)
 
-    ax1 = pl.subplot(1,3,1)
+    ax1 = pl.subplot(2,3,1)
     ax1.set_yscale('log')
-    ax1.plot(f*86400,dlogl_nobg,alpha=0.5,color='C0')
-    ax1.plot(f*86400,dlogl_nobg2+add_power,alpha=0.5,color='C1')
-    ax1.plot(f*86400,scale*window,color='k',alpha=0.3)
+    fmask = fday < 20.1
+    ax1.plot(fday[fmask],dlogl_nobg[fmask],alpha=0.8,color='C0')
+    #ax1.plot(fday,dlogl_nobg2+add_power,alpha=0.5,color='C1')
+    ax1.plot(fday[fmask],scale*window[fmask],color='k',alpha=0.5)
     ax1.set_ylabel('Power')
     ax1.axis([-0.1,20,10,2000])
+    ax1.set_xticklabels(['']*len(ax1.get_xticklabels()))
 
-    ia = pl.axes([0.18,0.48,0.15,0.45])
-    ia.plot(f*86400,dlogl_nobg,alpha=0.5,color='C0')
-    ia.plot(f*86400,dlogl_nobg2+add_power,alpha=0.5,color='C1')
-    ia.plot(f*86400,scale*window,color='k',alpha=0.3)
+    fmask = fday < 1.01
+    bb = ax1.get_position()
+    ia = pl.axes([bb.x0+bb.width*0.3,bb.y0+bb.height*0.45,bb.width*0.62,bb.height*0.5])
+    ia.plot(fday[fmask],dlogl_nobg[fmask],alpha=0.8,color='C0')
+    #ia.plot(fday[fmask],(dlogl_nobg2+add_power)[fmask],alpha=0.5,color='C1')
+    ia.plot(fday[fmask],scale*window[fmask],color='k',alpha=0.5)
+    #ia.set_yscale('log')
     ia.axis([0,1,0,1500])
 
-    ax2 = pl.subplot(1,3,2)
+    ax1 = pl.subplot(2,3,4)
+    fmask = fday < 20.1
+    ax1.set_yscale('log')
+    #ax1.plot(fday,dlogl_nobg,alpha=0.5,color='C0')
+    ax1.plot(fday[fmask],(dlogl_nobg2+add_power)[fmask],alpha=0.8,color='C1')
+    ax1.plot(fday[fmask],scale*window[fmask],color='k',alpha=0.5)
+    ax1.set_ylabel('Power')
+    ax1.axis([-0.1,20,10,2000])
+    ax1.set_xlabel('Frequency (cycles d$^{-1}$)')
+
+    fmask = fday < 1.01
+    bb = ax1.get_position()
+    ia = pl.axes([bb.x0+bb.width*0.3,bb.y0+bb.height*0.45,bb.width*0.625,bb.height*0.5])
+    ##ia.plot(fday[fmask],dlogl_nobg[fmask],alpha=0.8,color='C0')
+    ia.plot(fday[fmask],(dlogl_nobg2+add_power)[fmask],alpha=0.8,color='C1')
+    #ia.plot(fday[fmask],scale*window[fmask],color='k',alpha=0.5)
+    ia.axis([0,1,0,1500])
+
+
+    ax2 = pl.subplot(2,3,2)
     #ia = pl.axes([0.30,0.30,0.60,0.60])
     #mask = (f > 14.2/86400) & (f < 16.2/86400)
-    ax2.plot(f*86400,dlogl_nobg,alpha=0.5,color='C0')
-    ax2.plot(f*86400,dlogl_nobg2+add_power,alpha=0.5,color='C1')
-    ax2.plot(f*86400,scale*window,color='k',alpha=0.3)
-    ax2.axis([0,1,0,70])
-    ax2.set_xlabel('Frequency (cycles/day)')
+    fmask = fday < 1.01
+    ybound = 50
+    ax2.plot(fday[fmask],dlogl_nobg[fmask],alpha=0.8,color='C0')
+    ax2.plot(fday[fmask],(scale*window)[fmask],color='k',alpha=0.5)
+    ax2.axis([0,1,0,ybound])
+    ax2.set_xticklabels(['']*len(ax2.get_xticklabels()))
 
-    ax3 = pl.subplot(1,3,3)
+    width = (ax2.axis()[1]-ax2.axis()[0])*0.01
+    ax2.arrow(forb*86400,ybound,0,-3,width=width,head_length=2,
+            fc='k',ec='k',overhang=0.3)
+    ax2.arrow(2*forb*86400,ybound,0,-3,width=width,head_length=2,
+            fc='k',ec='k',overhang=0.3)
+    ax2.arrow(3*forb*86400,ybound,0,-3,width=width,head_length=2,
+            fc='k',ec='k',overhang=0.3)
+
+    ax2 = pl.subplot(2,3,5)
+
+    ax2.plot(fday[fmask],(dlogl_nobg2+add_power)[fmask],alpha=0.8,color='C1')
+    ax2.plot(fday[fmask],(scale*window)[fmask],color='k',alpha=0.5)
+    width = (ax2.axis()[1]-ax2.axis()[0])*0.01
+    ax2.arrow(forb*86400,ybound,0,-3,width=width,head_length=2,
+            fc='k',ec='k',overhang=0.3)
+    ax2.arrow(2*forb*86400,ybound,0,-3,width=width,head_length=2,
+            fc='k',ec='k',overhang=0.3)
+    ax2.arrow(3*forb*86400,ybound,0,-3,width=width,head_length=2,
+            fc='k',ec='k',overhang=0.3)
+    ax2.axis([0,1,ybound,0])
+    ax2.set_xlabel('Frequency (cycles d$^{-1}$)')
+
+    ax3 = pl.subplot(2,3,3)
+    fmask = (fday > 14.3) & (fday < 15.9)
+    ybound = 70
     scale *= 0.6
-    ax3.plot(f*86400,dlogl_nobg,alpha=0.5,color='C0')
-    ax3.plot(f*86400,dlogl_nobg2,alpha=0.5,color='C1')
-    ax3.plot(f*86400,scale*window,color='k',alpha=0.3)
-    ax3.plot((f-freqs[1])*86400,scale*window*0.5,color='k',alpha=0.3)
-    ax3.plot((f+freqs[1])*86400,scale*window*0.5,color='k',alpha=0.3)
-    ax3.plot((f-freqs[2])*86400,scale*window*0.25,color='k',alpha=0.3)
-    ax3.plot((f+freqs[2])*86400,scale*window*0.25,color='k',alpha=0.3)
-    ax3.axis([14.4,15.8,0,70])
+    ax3.plot(fday[fmask],dlogl_nobg[fmask],alpha=0.8,color='C0')
+    ax3.plot(fday[fmask],scale*window[fmask],color='k',alpha=0.5)
+    ax3.plot((f-freqs[1])[fmask]*86400,scale*window[fmask]*0.5,color='k',alpha=0.5)
+    ax3.plot((f+freqs[1])[fmask]*86400,scale*window[fmask]*0.5,color='k',alpha=0.5)
+    ax3.plot((f-freqs[2])[fmask]*86400,scale*window[fmask]*0.25,color='k',alpha=0.5)
+    ax3.plot((f+freqs[2])[fmask]*86400,scale*window[fmask]*0.25,color='k',alpha=0.5)
+    ax3.axis([14.4,15.8,0,ybound])
+    ax3.set_xticklabels(['']*len(ax3.get_xticklabels()))
+
+    ax3 = pl.subplot(2,3,6)
+
+    ax3.plot(fday[fmask],(dlogl_nobg2+add_power)[fmask],alpha=0.8,color='C1')
+    ax3.plot(fday[fmask],scale*window[fmask],color='k',alpha=0.5)
+    ax3.plot((f-freqs[1])[fmask]*86400,scale*window[fmask]*0.5,color='k',alpha=0.5)
+    ax3.plot((f+freqs[1])[fmask]*86400,scale*window[fmask]*0.5,color='k',alpha=0.5)
+    ax3.plot((f-freqs[2])[fmask]*86400,scale*window[fmask]*0.25,color='k',alpha=0.5)
+    ax3.plot((f+freqs[2])[fmask]*86400,scale*window[fmask]*0.25,color='k',alpha=0.5)
+    ax3.axis([14.4,15.8,ybound,0])
+    ax3.set_xlabel('Frequency (cycles d$^{-1}$)')
     #ia.set_yticklabels('')
 
 def make_ls5039_power_comparison(fignum=11):
@@ -791,7 +1051,7 @@ def make_ls5039_power_comparison(fignum=11):
     ax2.plot(f*86400,dlogl_nobg,alpha=0.5,color='C0')
     ax2.plot(f*86400,dlogl,alpha=0.5,color='C1')
     ax2.axis([0,1,0,1500])
-    ax2.set_xlabel('Frequency (cycles/day)')
+    ax2.set_xlabel('Frequency (cycles d$^{-1}$)')
 
     data = get_data('ls5039',clobber=True,do_pickle=False,max_radius=2)
     ts = data.get_cells(tcell=300,time_series_only=True,
@@ -806,6 +1066,7 @@ def make_ls5039_power_comparison(fignum=11):
 
 def make_cygx3_plot(fignum=13):
     p0 = 0.199693736062
+    forb = 1./p0
     data = get_data('cygx3',clobber=False)
     cells = data.get_cells(tcell=86400*14,use_barycenter=False)
     clls = core.CellsLogLikelihood(cells,profile_background=True)
@@ -819,6 +1080,7 @@ def make_cygx3_plot(fignum=13):
     # disable upper limits -- want best estimates of flux density
     r1,r2 = clls.plot_cells_bb(bb_prior=8,tsmin=-1,ax=ax1)
     ax1.axis([54450,58750,-1,30])
+    ax1.set_xticks([55500,56600,57700])
     ax1.set_ylabel("Relative Flux / Power")
 
     left_edges = r2[:,0]-r2[:,1]
@@ -826,12 +1088,17 @@ def make_cygx3_plot(fignum=13):
     edges = mjd2met(np.append(left_edges,right_edges[-1]))
     scales = r2[:,2]
     ts = data.get_cells(tcell=600,time_series_only=True,trim_zero_exposure=False,scale_series=[edges,scales])
+
+    # power spectrum with re-scaled data
     f,dlogl_nobg,dlogl,dlogl_null = core.power_spectrum_fft(ts)
     fcygx3 = 1./(0.19968476+5.42e-10*(56561-40000))
     freqs = [fcygx3/86400]
     corr,pows = core.get_orbital_modulation(ts,freqs)
+
+    # power spectrum with rescaled data and spectral leakage reduction 
     f2,dlogl_nobg2,dlogl2,dlogl_null2 = core.power_spectrum_fft(ts,exposure_correction=corr)
     ts = data.get_cells(tcell=600,time_series_only=True,trim_zero_exposure=False)
+    # power spectrum *without* re-scaling
     f3,dlogl_nobg3,dlogl3,dlogl_null3 = core.power_spectrum_fft(ts)
 
     add_power = np.zeros_like(dlogl_nobg2)
@@ -839,32 +1106,43 @@ def make_cygx3_plot(fignum=13):
         idx = np.argmin(np.abs(f[1:]-freq))
         add_power[idx] = p
 
+    fday = f*86400
     ax2 = pl.subplot(1,3,2)
     ax2.clear()
-    ax2.plot(f*86400,dlogl_nobg3,alpha=0.5,color='C0')
+    ax2.plot(fday,dlogl_nobg3,alpha=0.8,color='C0') # no re-scaling
     #ax2.plot(f*86400,dlogl_nobg2+add_power,alpha=0.5,color='C1')
     #ax2.plot(f*86400,scale*window,color='k',alpha=0.3)
-    ax2.plot(f*86400,dlogl_nobg2+add_power,alpha=0.5,color='C1')
-    ax2.set_xlabel('Frequency (cycles/day)')
+    ax2.plot(fday,-(dlogl_nobg2+add_power),alpha=0.8,color='C1') # rescaling with correction
+    ax2.set_xlabel('Frequency (cycles d$^{-1}$)')
     #ax2.set_ylabel('Power')
-    ax2.axis([-1,36,0,240])
-    ax2.axvline(1./p0,ymin=0.9,ymax=1.0,ls='--',color='C3',alpha=0.3)
+    ybound = 240
+    ax2.axis([-1,36,-ybound,ybound])
+    width = (ax2.axis()[1]-ax2.axis()[0])*0.01
+    ax2.arrow(forb,ybound,0,-21,width=width,head_length=14,
+            fc='k',ec='k',overhang=0.3)
+    ax2.arrow(forb,-ybound,0,21,width=width,head_length=14,
+            fc='k',ec='k',overhang=0.3)
 
 
     f,window = core.power_spectrum_fft(ts,exp_only=True)
+    fmask = (fday > (forb-0.06)) & (fday < (forb+0.06))
     ax3 = pl.subplot(1,3,3)
     ax3.clear()
-    ax3.plot(f*86400,dlogl_nobg,alpha=0.5,color='C0')
-    ax3.plot(f*86400,dlogl_nobg2+add_power,alpha=0.5,color='C1')
-    ax3.plot(f*86400./3,window/14570*100*3,color='k',alpha=0.3)
-    #ax3.set_ylabel('Power')
+    ax3.plot(fday[fmask],dlogl_nobg[fmask],alpha=0.8,color='C2') # rescaling without correction
+    ax3.plot(fday[fmask],-(dlogl_nobg2+add_power)[fmask],alpha=0.8,color='C1')
+    fmask = (fday/3 > (forb-0.06)) & (fday/3 < (forb+0.06))
+    ax3.plot((fday/3)[fmask],window[fmask]/14570*50*3,color='k',alpha=0.5)
+    ax3.plot((fday/3)[fmask],-window[fmask]/14570*50*3,color='k',alpha=0.5)
 
-    ax3.set_xlabel('Frequency (cycles/day)')
-    #ax3.axis([-1,36,0,220])
-    ax3.axis([1./p0-0.05,1./p0+0.05,0,240])
-    ax3.axvline(1./p0,ymin=0.9,ymax=1.0,ls='--',color='C3',alpha=0.3)
+    ax3.set_xlabel('Frequency (cycles d$^{-1}$)')
+    ax3.axis([forb-0.05,forb+0.05,-ybound,ybound])
+    width = (ax3.axis()[1]-ax3.axis()[0])*0.01
+    ax3.arrow(forb,ybound,0,-21,width=width,head_length=14,
+            fc='k',ec='k',overhang=0.3)
+    ax3.arrow(forb,-ybound,0,21,width=width,head_length=14,
+            fc='k',ec='k',overhang=0.3)
 
-#ia = pl.axis([0.78,0.48,0.18,0.45])
+    #ia = pl.axis([0.78,0.48,0.18,0.45])
 
 def plot_ls5039_aperture_dependence(fignum=12):
 
