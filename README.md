@@ -8,6 +8,7 @@
 Once you have a working fermitools/Science Tools installation, the following two steps should suffice.  Once accomplished, treat like any other Python code!
 
 (1) You will need to have libskymaps.so in your PYTHONPATH.  This will be somewhere like e.g. miniconda2/envs/fermi/lib/fermitools.  This doesn't happen by default when you activate the fermi conda environment, so it's helpful to make a setup script that activates the environment then additionally sets the path.
+
 (2) You will need CALDB to point to the right place.  This *should* be taken care of when you activate the fermi environment.
 
 # Use
