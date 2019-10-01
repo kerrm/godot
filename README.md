@@ -2,6 +2,9 @@
 
 *godot* is a collection of Python code for performing likelihood analysis with photon weights, primarily with *Fermi* Large Area Telescope data.
 
+# Why "*godot*"?
+Weight and see!
+
 # Installation
 *godot* requires an installation of fermitools from the Fermi Science Support Center.  I suggest the conda distribution, but this code should work with an older distribution, too.
 
