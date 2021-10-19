@@ -261,8 +261,10 @@ def scan_grid_slice(i0,i1,tc,ts,ce,se,nharm=40,dw=0.01,dphi=0.01):
             rvals[iw,ip] = logls.max()
     return rvals
 
-def scan_grid_slice_adapt(i0,i1,tc,ts,ce,se,nharm=40,fix_phase=None):
-    width_grid = np.logspace(-2,-0.3,51)
+def scan_grid_slice_adapt(i0,i1,tc,ts,ce,se,nharm=40,fix_phase=None,
+        width_grid=None):
+    if width_grid is None:
+        width_grid = np.logspace(-2,-0.3,51)
     #width_grid = np.arange(0.01,0.51,0.02)
     widths = deque()
     phases = deque()

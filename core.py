@@ -103,7 +103,7 @@ class CellTimeSeries(object):
         ## exposure mask
         self.minimum_exposure = minimum_exposure
         mask = ~(exp > minimum_exposure)
-        print 'exposure filter %d/%d:'%(mask.sum(),len(mask))
+        print('exposure filter %d/%d:'%(mask.sum(),len(mask)))
         self.exp[mask] = 0
         self.sexp[mask] = 0
         self.bexp[mask] = 0
@@ -292,7 +292,7 @@ class CellLogLikelihood(object):
         t1[:] = 1+beta*iw+alpha*w
         grad_alpha = np.sum(w/t1)-S
         grad_beta = np.sum(iw/t1)-B
-        print p,grad_alpha,grad_beta
+        print(p,grad_alpha,grad_beta)
         return [-grad_alpha,-grad_beta]
 
     def fmin_fsolve_jac(self,p):
@@ -337,7 +337,7 @@ class CellLogLikelihood(object):
         iw = 1-self.we
         S = self.S
         t = np.empty_like(self.we)
-        for i in xrange(niter):
+        for i in range(niter):
             t[:] = w/(a*w+iw)
             f1 = np.sum(t)-S
             t *= t
@@ -353,7 +353,7 @@ class CellLogLikelihood(object):
         S = self.S
         t = np.empty_like(self.we)
         t2 = np.empty_like(self.we)
-        for i in xrange(niter):
+        for i in range(niter):
             t[:] = w/(a*w+iw)
             f1 = np.sum(t)-S
             np.multiply(t,t,out=t2)
@@ -392,7 +392,7 @@ class CellLogLikelihood(object):
 
             if not((rc < 0) or (rc > 2)):
                 if (guess == 0) and (rvals[0] > 5e-2):
-                    print 'Warning, possible inconsistency.  Guess was 0, best fit value %.5g.'%(rvals[0]),'beta=',beta
+                    print('Warning, possible inconsistency.  Guess was 0, best fit value %.5g.'%(rvals[0]),'beta=',beta)
                 return rvals
 
             # try a small grid to seed a search
@@ -407,7 +407,7 @@ class CellLogLikelihood(object):
             if not((rc < 0) or (rc > 2)):
                 return rvals
             else:
-                print 'Warning, trouble locating maximum with profile_background!  Results for this interval may be unreliable.'
+                print('Warning, trouble locating maximum with profile_background!  Results for this interval may be unreliable.')
             return rvals
 
         w = self.we
@@ -487,7 +487,7 @@ class CellLogLikelihood(object):
             rvals,nfeval,rc = fmin_tnc(self.fmin_tnc_func,[guess,beta],
                     bounds=[[0,None],[0,None]],disp=0,ftol=1e-3)
             if (rc < 0) or (rc > 2):
-                print 'Warning, best guess probably wrong.'
+                print('Warning, best guess probably wrong.')
             return rvals
 
         w = self.we
@@ -512,7 +512,7 @@ class CellLogLikelihood(object):
 
         a0 = -1
         amax = guess
-        for i in xrange(12):
+        for i in range(12):
             if f(amax) < 0:
                 break
             a0 = amax
@@ -645,7 +645,7 @@ class CellLogLikelihood(object):
 
         b0 = -1
         bmax = guess-1
-        for i in xrange(8):
+        for i in range(8):
             if f(bmax) < 0:
                 break
             b0 = bmax
@@ -672,7 +672,7 @@ class CellLogLikelihood(object):
             llmax = np.log(iw).sum()
             # do a few NR iterations
             amax = max(0,-(llmax+dlogl)/(np.sum(we/(1-we))-S))
-            for i in xrange(10):
+            for i in range(10):
                 t[:] = amax*we+iw
                 f0 = np.log(t).sum()-amax*S+dlogl-llmax
                 f1 = np.sum(we/t)-S
@@ -687,7 +687,7 @@ class CellLogLikelihood(object):
             f2 = np.abs(np.sum((we/t)**2))
             amax = aopt + np.sqrt(2*dlogl/f2)
             # do a few NR iterations
-            for i in xrange(5):
+            for i in range(5):
                 t[:] = amax*we+iw
                 f0 = np.log(t).sum()-amax*S+dlogl-llmax
                 f1 = np.sum(we/t)-S
@@ -701,7 +701,7 @@ class CellLogLikelihood(object):
             f2 = np.abs(np.sum((we/t)**2))
             amin = aopt - np.sqrt(2*dlogl/f2)
             # do a few NR iterations
-            for i in xrange(5):
+            for i in range(5):
                 t[:] = amin*we+iw
                 f0 = np.log(t).sum()-amin*S+dlogl-llmax
                 f1 = np.sum(we/t)-S
@@ -747,7 +747,7 @@ class CellLogLikelihood(object):
         amin = 0
         amax = max(5,a0)
         # make sure upper range contains root
-        for i in xrange(4):
+        for i in range(4):
             if f(amax) > 0:
                 a0 = amax
                 amax *= amax
@@ -901,8 +901,8 @@ class CellsLogLikelihood(object):
         rvals = np.empty((2,i1-i0))
         cod = np.zeros(npt)
 
-        #for i in xrange(0,len(rvals)):
-        for i in xrange(0,rvals.shape[1]):
+        #for i in range(0,len(rvals)):
+        for i in range(0,rvals.shape[1]):
             cod += np.interp(dom,self._dom[i1-1-i],self._cod[i1-1-i],
                     left=-np.inf,right=-np.inf)
             amax = np.argmax(cod)
@@ -927,7 +927,7 @@ class CellsLogLikelihood(object):
         tmp = fitness(0,1)
         best[1] = tmp[0]-prior
         fitness_vals.append(tmp)
-        for i in xrange(1,ncell):
+        for i in range(1,ncell):
             # form A(r) (Scargle VI)
             tmp = fitness(0,i+1)
             fitness_vals.append(tmp)
@@ -962,7 +962,7 @@ class CellsLogLikelihood(object):
         last = np.empty(ncell,dtype=int)
         last[0] = 0; best[0] = 0
         best[1] = fv[0]-prior
-        for i in xrange(1,ncell):
+        for i in range(1,ncell):
             # form A(r) (Scargle VI)
             a = fv[i] - prior + best[:i+1]
             # identify last changepoint in new optimal partition
@@ -1395,7 +1395,7 @@ class Data(object):
             rvals = np.empty([len(edom),len(pcosines)])
             wts = np.empty(len(edom))
             total_exposure = np.empty_like(edom)
-            for i in xrange(len(edom)):
+            for i in range(len(edom)):
                 faeff,baeff = ea([edom[i]],pcosines,phi=phi)
                 faeff += baeff
                 total_exposure[i] = np.sum(faeff*livetime)
@@ -1591,14 +1591,14 @@ class Data(object):
 
         # if the photon follows the break, move the previous cell stop 
         # time up to break and move the current start time to end of break
-        m_follow = (ti[idx]-break_stops) > 0
+        m_follow = ((ti[idx]-break_stops) > 0) | (idx == len(ti) - 1)
         cell_stops[idx[m_follow]-1] = break_starts[m_follow]
         cell_starts[idx[m_follow]] = break_stops[m_follow]
         # if the photon precedes the break, move the current cell stop 
         # to the break start and the following cell start time to the end
         m_precede = ~m_follow
         cell_stops[idx[m_precede]] = break_starts[m_precede]
-        cell_starts[idx[m_precede]+1] = break_stops[m_follow]
+        cell_starts[idx[m_precede]+1] = break_stops[m_precede]
 
         # now just need to compute exposure; this can be done just by
         # tweaking the times above, but let's just make it easy for now
@@ -1813,7 +1813,7 @@ class Data(object):
             weights_vec = np.zeros(len(starts),dtype=float)
             weights2_vec = np.zeros(len(starts),dtype=float)
             idx = 0
-            for i in xrange(len(starts)):
+            for i in range(len(starts)):
                 if nweights[i] > 0:
                     w = weights[idx:idx+nweights[i]]
                     idx += nweights[i]
@@ -1839,7 +1839,7 @@ class Data(object):
         cells = deque()
         idx = 0
         SonB = self.S/self.B*(scale or 1)
-        for i in xrange(len(starts)):
+        for i in range(len(starts)):
             t = times[idx:idx+nweights[i]]
             w = weights[idx:idx+nweights[i]]
             idx += nweights[i]
@@ -1866,7 +1866,7 @@ class Data(object):
             we = np.empty(nphot)
             ti = np.empty(nphot)
             counter = 0
-            for i in xrange(ncell):
+            for i in range(ncell):
                 i0,i1 = start_idx[i],stop_idx[i]
                 myn = i1-i0
                 we[counter:counter+myn] = self.we[i0:i1]
@@ -1899,7 +1899,7 @@ class Data(object):
 
                 
         cells = deque()
-        for i in xrange(len(tstarts)):
+        for i in range(len(tstarts)):
             i0,i1 = start_idx[i],stop_idx[i]
             cells.append(Cell(tstarts[i],tstops[i],exp[i],
                 self.ti[i0:i1].copy(),self.we[i0:i1].copy(),self.S/self.B))
@@ -1979,7 +1979,7 @@ class PhaseData(Data):
         exp = self.S/ncell
         SonB = self.S/self.B
 
-        for i in xrange(len(starts)):
+        for i in range(len(starts)):
             t = times[idx:idx+nweights[i]]
             w = weights[idx:idx+nweights[i]]
             idx += nweights[i]
@@ -2113,7 +2113,7 @@ def compute_ls(cll,freqs,unweighted=False):
     cos_cod = np.cos(np.linspace(0,2*np.pi,1001)[:-1])
     sin_cod = np.sin(np.linspace(0,2*np.pi,1001)[:-1])
 
-    for i in xrange(len(rvals)):
+    for i in range(len(rvals)):
 
         tph[:] = np.multiply(ph_basis,freqs[i],out=sph)
         sph -= tph
@@ -2162,7 +2162,7 @@ def power_spectrum_dft(cll,freqs,unweighted=False):
     cos_cod = np.cos(np.linspace(0,2*np.pi,1001)[:-1])
     sin_cod = np.sin(np.linspace(0,2*np.pi,1001)[:-1])
 
-    for i in xrange(len(rvals)):
+    for i in range(len(rvals)):
 
         np.multiply(ph_basis,freqs[i],out=sph)
         correction = 1-(dt*2*np.pi*freqs[i])**2/24
@@ -2320,7 +2320,7 @@ def bb_prior_tune(data,tcell,bb_priors=[2,3,4,5,6,7,8,9,10],ntrial=10,
     """
 
     rvals = np.empty((len(bb_priors),ntrial),dtype=int)
-    for itrial in xrange(ntrial):
+    for itrial in range(ntrial):
 
         if orbital:
             cells = data.get_contiguous_exposure_cells(
@@ -2346,7 +2346,7 @@ def plot_bb_prior_results(rvals):
     """
     rvals = rvals.astype(int)
     minlength = max(rvals.max()+1,50)
-    blah = np.asarray([np.bincount(rvals[i],minlength=minlength) for i in xrange(rvals.shape[0])])
+    blah = np.asarray([np.bincount(rvals[i],minlength=minlength) for i in range(rvals.shape[0])])
     pl.clf()
     pl.imshow(blah,interpolation='nearest',aspect='auto')
 
@@ -2371,7 +2371,7 @@ def get_orbital_modulation(ts,freqs):
     rvals = np.ones_like(ti)
     y = (ts.weights-ts.sexp)/ts.sexp.mean()
     pows = np.empty(len(freqs))
-    for i in xrange(len(freqs)):
+    for i in range(len(freqs)):
         ph = np.mod((ti-ti[0])*freqs[i],1)*(2*np.pi)
         cph = np.cos(ph)
         sph = np.sin(ph)

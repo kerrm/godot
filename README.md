@@ -2,9 +2,6 @@
 
 *godot* is a collection of Python code for performing likelihood analysis with photon weights, primarily with *Fermi* Large Area Telescope data.
 
-# Why "*godot*"?
-Weight and see!
-
 # Installation
 *godot* requires an installation of fermitools from the Fermi Science Support Center.  I suggest the conda distribution, but this code should work with an older distribution, too.
 
@@ -16,6 +13,6 @@ Once you have a working fermitools/Science Tools installation, the following two
 
 # Use
 
-The best way to get started is to look at the [paper] (TODO -- add arXiv link when available) and then have a look at paper_plots.py, which has code to generate every plot in the paper, and thus gives a nice range of examples.
+The best way to get started is to look at the [paper](https://ui.adsabs.harvard.edu/abs/2019ApJ...885...92K/abstract) and then have a look at paper_plots.py, which has code to generate every plot in the paper, and thus gives a nice range of examples.
 
 Many of the data sets I used are given nicknames and saved.  To make one from scratch, see paper_plots.py/make_j1231_pulse_profile.
