@@ -1,5 +1,5 @@
 import core
-import cPickle
+import pickle
 from astropy.io import fits
 
 data_path = '/data/kerrm/photon_data'
@@ -22,17 +22,17 @@ def load_ft1file(source,ft1file,weightcol,clobber=False,do_pickle=True,
 
     if not clobber:
         try:
-            data = cPickle.load(file('%s_data.pickle'%source))
-            print 'returning cached version of Data object'
+            data = pickle.load(open('%s_data.pickle'%source,'rb'))
+            print('returning cached version of Data object')
             return data
         except:
             pass
 
     ra,dec,rad = get_position_from_ft1(ft1file)
-    print 'Using ra = %s, dec = %s, with extraction radius %s'%(ra,dec,rad)
+    print('Using ra = %s, dec = %s, with extraction radius %s'%(ra,dec,rad))
 
     if ('max_radius' in data_kwargs) and (float(rad) < data_kwargs['max_radius']):
-        print 'Warning, specified max_radius=%s but data cuts imply %s.'%(data_kwargs['max_radius'],rad)
+        print('Warning, specified max_radius=%s but data cuts imply %s.'%(data_kwargs['max_radius'],rad))
 
     if ft2file is None:
         ft2files = ['%s/ft2.fits'%data_path]
@@ -43,7 +43,7 @@ def load_ft1file(source,ft1file,weightcol,clobber=False,do_pickle=True,
     data = core.Data([ft1file],ft2files,ra,dec,weightcol,
             base_spectrum=spectrum,zenith_cut=100,**data_kwargs)
     if do_pickle:
-        cPickle.dump(data,file('%s_data.pickle'%source,'wb'),protocol=2)
+        pickle.dump(data,open('%s_data.pickle'%source,'wb'),protocol=2)
     return data
 
 
@@ -55,8 +55,8 @@ def get_data(source,clobber=False,do_pickle=True,**data_kwargs):
 
     if not clobber:
         try:
-            data = cPickle.load(file('%s_data.pickle'%source))
-            print 'returning cached version of Data object'
+            data = pickle.load(file('%s_data.pickle'%source,'rb'))
+            print('returning cached version of Data object')
             return data
         except:
             pass
@@ -122,30 +122,30 @@ def get_data(source,clobber=False,do_pickle=True,**data_kwargs):
         jname = 'J1256-0547_fake'
 
     else:
-        print 'Did not recognize a source alias.  Assuming source==jname.'
+        print('Did not recognize a source alias.  Assuming source==jname.')
         jname = source
         #raise NotImplementedError('did not recognize %s'%source)
 
     if (data is not None):
         if do_pickle:
-            cPickle.dump(data,file('%s_data.pickle'%source,'wb'),protocol=2)
+            pickle.dump(data,open('%s_data.pickle'%source,'rb'),protocol=2)
         return data
 
     spectrum = lambda E: (E/1000)**-2.1
     ft1files = ['%s/%s_%s.fits'%(data_path,jname,'bary' if 'bary' in source else 'topo')]
 
     ra,dec,rad = get_position_from_ft1(ft1files[0])
-    print 'Using ra = %s, dec = %s, with extraction radius %s'%(ra,dec,rad)
+    print('Using ra = %s, dec = %s, with extraction radius %s'%(ra,dec,rad))
 
     if ('max_radius' in data_kwargs) and (float(rad) < data_kwargs['max_radius']):
-        print 'Warning, specified max_radius=%s but data cuts imply %s.'%(data_kwargs['max_radius'],rad)
+        print('Warning, specified max_radius=%s but data cuts imply %s.'%(data_kwargs['max_radius'],rad))
 
     ft2files = ['%s/ft2.fits'%data_path]
 
     data = core.Data(ft1files,ft2files,ra,dec,'PSR%s'%jname,
             base_spectrum=spectrum,zenith_cut=100,**data_kwargs)
     if do_pickle:
-        cPickle.dump(data,file('%s_data.pickle'%source,'wb'),protocol=2)
+        pickle.dump(data,open('%s_data.pickle'%source,'wb'),protocol=2)
     return data
 
 

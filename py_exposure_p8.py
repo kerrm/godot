@@ -10,6 +10,7 @@ Requires: Fermi ScienceTools
 
 author(s): Matthew Kerr
 """
+from __future__ import print_function
 import numpy as np
 from astropy.io import fits
 from math import sin,cos
@@ -38,7 +39,7 @@ class Binning(object):
         keyword_options.process(self,kwargs)
         if self.phi_bins is not None:
             if (self.phi_bins[0] < 0) or (self.phi_bins[-1] > np.pi/2):
-                print 'Warning, azimuth angles are wrapped to 0 to pi/2'
+                print('Warning, azimuth angles are wrapped to 0 to pi/2')
 
     def equals(self,bins):
         equal = True
@@ -100,7 +101,7 @@ class Livetime(object):
         """ Take the union of all GTIs provided by FT1 files, then take an 
             intersection with the (optional) gti_mask and the time limits.
         """
-        if self.verbose >= 1: print 'Processing GTI...'
+        if self.verbose >= 1: print('Processing GTI...')
         if not hasattr(ft1files,'__iter__'): ft1files = [ft1files]
         gti = self.gti = Gti(ft1files[0])
         if len(ft1files) > 1:
@@ -112,14 +113,14 @@ class Livetime(object):
             before = round(gti.computeOntime())
             gti.intersection(self.gti_mask)
             if verbose >= 1:
-                print 'Applied GTI mask; ontime reduced from %ds to %ds'%(
-                        before,round(gti.computerOntime()))
+                print('Applied GTI mask; ontime reduced from %ds to %ds'%(
+                        before,round(gti.computerOntime())))
 
         self.gti_starts = np.sort(gti.get_edges(True))
         self.gti_stops = np.sort(gti.get_edges(False))
         if self.verbose >= 1:
-            print 'Finished computing GTI from FT1 files; total ontime = %ds'%(
-                    round(gti.computeOntime()))
+            print('Finished computing GTI from FT1 files; total ontime = %ds'%(
+                    round(gti.computeOntime())))
 
     def _update_gti(self):
         """ Trim GTI to FT2 boundaries.
@@ -160,16 +161,16 @@ class Livetime(object):
         ends_in_gap = (g1 > gap_starts[i1]) & (i1 < len(gap_stops)-1)
 
         if np.any(starts_in_gap | ends_in_gap):
-            print """"WARNING!!!
+            print(""""WARNING!!!
             
             GTI are present with no spacecraft pointing information!  
             This likely represents a problem with the input file. 
             This algorithm will attempt to compute the exposure correctly
             by adjusting the GTI, but you will need to apply the resulting
             mask to the events directly.
-            """
+            """)
 
-            print g0[starts_in_gap]
+            print(g0[starts_in_gap])
 
         # adjust all GTI to gap boundaries
         g0[starts_in_gap] = gap_stops[i0[starts_in_gap]]
@@ -187,7 +188,7 @@ class Livetime(object):
     def _setup_ft2(self,ft2files):
         """Load in the FT2 data.  Optionally, mask out values that will not
            contibute to the exposure."""
-        if self.verbose >= 1: print 'Loading FT2 files...'
+        if self.verbose >= 1: print('Loading FT2 files...')
         if not hasattr(ft2files,'__iter__'): ft2files = [ft2files]
         handles = [fits.open(ft2,memmap=False) for ft2 in ft2files]
         ft2lens = [handle['SC_DATA'].data.shape[0] for handle in handles]
@@ -197,7 +198,7 @@ class Livetime(object):
         counter = 0
         for ihandle,handle in enumerate(handles):
             if self.verbose > 1:
-                print '...Loading FT2 file # %d'%(ihandle)
+                print('...Loading FT2 file # %d'%(ihandle))
             n = ft2lens[ihandle]
             for ifield,field in enumerate(fields):
                 arrays[ifield][counter:counter+n] = handle['SC_DATA'].data.field(field)
@@ -225,10 +226,10 @@ class Livetime(object):
 
         # ensure entries are sorted by time
         self.mask_entries(np.argsort(self.START)) 
-        if self.verbose > 1: print 'Finished loading FT2 files!'
+        if self.verbose > 1: print('Finished loading FT2 files!')
   
     def _process_ft2(self):
-        if self.verbose >= 1: print 'Processing the FT2 file (calculating overlap with GTI)...'
+        if self.verbose >= 1: print('Processing the FT2 file (calculating overlap with GTI)...')
         func = self._process_ft2_fast if self.fast_ft2 else \
                self._process_ft2_slow
         overlaps = func(self.gti_starts,self.gti_stops)
@@ -246,7 +247,7 @@ class Livetime(object):
         self.LTFRAC = self.LIVETIME/(self.STOP-self.START)
         self.fields += ['LTFRAC']
         self.LIVETIME *= overlaps
-        if self.verbose > 1: print 'Finished processing the FT2 file!'
+        if self.verbose > 1: print('Finished processing the FT2 file!')
 
     def _process_ft2_slow(self,gti_starts,gti_stops):
         """Calculate the fraction of each FT2 interval lying within the GTI.
@@ -375,7 +376,7 @@ class Livetime(object):
         event_idx = np.searchsorted(self.gti_stops,timestamps)
         mask = event_idx < len(self.gti_stops)
         mask[mask] = timestamps > self.gti_starts[event_idx[mask]]
-        print 'gti mask: %d/%d'%(mask.sum(),len(mask))
+        print('gti mask: %d/%d'%(mask.sum(),len(mask)))
         return mask
 
 class BinnedLivetime(Livetime):
@@ -433,8 +434,8 @@ class EfficiencyCorrection(object):
         try:
             self.v1,self.v2,self.v3,self.v4 = f['EFFICIENCY_PARAMS'].data.field('EFFICIENCY_PARS')
         except KeyError:
-            print 'Efficiency parameters not found in %s.'%irf_file
-            print 'Assuming P6_v3_diff parameters.'
+            print('Efficiency parameters not found in %s.'%irf_file)
+            print('Assuming P6_v3_diff parameters.')
             self.v1 = [-1.381,  5.632, -0.830, 2.737, -0.127, 4.640]  # p0, front
             self.v2 = [ 1.268, -4.141,  0.752, 2.740,  0.124, 4.625]  # p1, front
             self.v3 = [-1.527,  6.112, -0.844, 2.877, -0.133, 4.593]  # p0, back
@@ -489,7 +490,7 @@ class InterpTable(object):
 
     def set_indices(self,x,y,bilinear=True):
         if bilinear and (not self.augment):
-            print 'Not equipped for bilinear, going to nearest neighbor.'
+            print('Not equipped for bilinear, going to nearest neighbor.')
             bilinear = False
         self.bilinear = bilinear
         if not bilinear:
@@ -691,7 +692,7 @@ class ExposurePhase(object):
             tbhdu = fits.new_table([c],header=None)
             tbhdu.writeto(output,clobber=True)
             cmd = 'tempo2 -gr fermi -ft1 %s -ft2 %s -f %s -phase -ophase'%(output,ft2,par)
-            print 'Executing: \n',cmd
+            print('Executing: \n',cmd)
             os.system(cmd)
         f = fits.open(output)
         self.phase = f[1].data.field('ORBITAL_PHASE')

@@ -1,4 +1,5 @@
 # for some reason this needs to be first with new conda install.  gross.
+from __future__ import pxrint_function
 import py_exposure_p8
 
 import numpy as np
@@ -779,10 +780,10 @@ class CellLogLikelihood(object):
             return 0
         if aopt is None:
             aopt = self.get_max(profile_background=profile_background)
-            print aopt
+            print(aopt)
             if profile_background:
                 aopt = aopt[0] # discard beta
-            print aopt
+            print(aopt)
         if aopt == 0:
             return 0
         func = self.log_profile_likelihood if profile_background else self.log_likelihood
@@ -803,7 +804,7 @@ class CellLogLikelihood(object):
             if profile_background:
                 aopt = aopt[0]
             if abs(dom[amax]-aopt) > 0.1: # somewhat ad hoc
-                print 'failed to obtain agreement, using internal version'
+                print('failed to obtain agreement, using internal version')
                 aopt = dom[amax]
         ts = self.get_ts(aopt=aopt,profile_background=profile_background)
         cdf = cumtrapz(cod,dom,initial=0)
@@ -860,7 +861,7 @@ class CellsLogLikelihood(object):
     def __init__(self,cells,profile_background=False):
 
         # construct a sampled log likelihoods for each cell
-        self.clls = map(CellLogLikelihood,cells)
+        self.clls = [CellLogLikelihood(x) for x in cells]
         npt = 200
         self._cod = np.empty([len(cells),npt])
         self._dom = np.empty([len(cells),npt])
@@ -876,10 +877,10 @@ class CellsLogLikelihood(object):
     def sanity_check(self):
         dx = self._dom[:,-1]-self._dom[:,0]
         bad_x = np.ravel(np.argwhere(np.abs(dx) < 1e-3))
-        print 'Indices with suspiciously narrow support ranges: ',bad_x
+        print('Indices with suspiciously narrow support ranges: ',bad_x)
         ymax = self._cod.max(axis=1)
         bad_y = np.ravel(np.argwhere(np.abs(ymax)>0.2))
-        print 'Indices where there is a substantial disagreement in the optimized value of the log likelihood and the codomain: ', bad_y
+        print('Indices where there is a substantial disagreement in the optimized value of the log likelihood and the codomain: ', bad_y)
     
     def fitness(self,i0,i1):
         """ Return the maximum likelihood estimator and value for the
@@ -901,7 +902,6 @@ class CellsLogLikelihood(object):
         rvals = np.empty((2,i1-i0))
         cod = np.zeros(npt)
 
-        #for i in range(0,len(rvals)):
         for i in range(0,rvals.shape[1]):
             cod += np.interp(dom,self._dom[i1-1-i],self._cod[i1-1-i],
                     left=-np.inf,right=-np.inf)
@@ -1134,8 +1134,8 @@ class CellsLogLikelihood(object):
         # now, do same for Bayesian blocks
         if not no_bb:
             bb_idx,bb_ts,var_ts,var_dof,fitness = self.do_bb(prior=bb_prior)
-            print var_ts,var_dof
-            print 'Variability significance: ',chi2.sf(var_ts,var_dof)
+            print(var_ts,var_dof)
+            print('Variability significance: ',chi2.sf(var_ts,var_dof))
             bb_idx = np.append(bb_idx,len(self.cells))
             rvals_bb = np.empty([len(bb_idx)-1,5])
             for ibb,(start,stop) in enumerate(zip(bb_idx[:-1],bb_idx[1:])):
@@ -1187,8 +1187,8 @@ class CellsLogLikelihood(object):
 
         # now, do same for Bayesian blocks
         bb_idx,bb_ts,var_ts,var_dof,fitness = self.do_bb(prior=bb_prior)
-        print var_ts,var_dof
-        print 'Variability significance: ',chi2.sf(var_ts,var_dof)
+        print(var_ts,var_dof)
+        print('Variability significance: ',chi2.sf(var_ts,var_dof))
         bb_idx = np.append(bb_idx,len(self.cells))
         rvals_bb = np.empty([len(bb_idx)-1,5])
         for ibb,(start,stop) in enumerate(zip(bb_idx[:-1],bb_idx[1:])):
@@ -1298,7 +1298,7 @@ class Data(object):
                 max_radius=max_radius)
         ti = data[0]
         if self.timeref=='SOLARSYSTEM':
-            print 'WARNING!!!!  Barycentric data not accurately treated'
+            print('WARNING!!!!  Barycentric data not accurately treated')
         
         # this is a problem if the data are barycentered
         event_idx = np.searchsorted(lt.STOP,ti)
@@ -1319,10 +1319,10 @@ class Data(object):
             self.bary_ti = None
 
         if use_weights_for_exposure:
-            print 'beginning exposure refinement'
+            print('beginning exposure refinement')
             # do a refinement of exposure calculation
             aeff,self.total_exposure_edom,self.total_exposure = self._get_weighted_aeff(pcosines,phi,base_spectrum=None,use_event_weights=True,livetime=lt.LIVETIME[mask])
-            print 'finished exposure refinement'
+            print('finished exposure refinement')
 
 
         # do another sort into the non-zero times
@@ -1355,7 +1355,7 @@ class Data(object):
             s8 = self.we[mask].sum()/self.exposure[emask].sum()
             stot = self.we.sum()/self.exposure.sum()
             new_alpha = stot/s8
-            print 'Rescaling with alpha=%.2f.'%(new_alpha)
+            print('Rescaling with alpha=%.2f.'%(new_alpha))
             self.we = new_alpha*self.we/(new_alpha*self.we+(1-self.we))
 
         self.E = np.sum(self.exposure)
@@ -1431,7 +1431,7 @@ class Data(object):
         # cosine(polar angle) of source in S/C system
                 cosines  = cdec_src*np.cos(dec)*np.cos(ra-np.radians(self.ra)) + sdec_src*np.sin(dec)
                 mask = cosines >= np.cos(np.radians(max_radius))
-                print 'keeping %d/%d photons for radius cut'%(mask.sum(),len(mask))
+                print('keeping %d/%d photons for radius cut'%(mask.sum(),len(mask)))
             else:
                 mask = slice(0,f['events'].header['naxis2'])
             for c,d in zip(cols,deques):
@@ -1447,7 +1447,7 @@ class Data(object):
         #ti = ti[a] # I think this was incorrect
         # the argsort mask order 
         if (tstart is not None) and (tstop is not None):
-            print 'applying time cut'
+            print('applying time cut')
             tstart = tstart or 0
             tstop = tstop or 999999999
             idx = a[(ti >= tstart) & (ti <= tstop)]
@@ -1544,7 +1544,7 @@ class Data(object):
         # find the events within that interval
         event_idx0,event_idx1 = np.searchsorted(self.ti,[tstart,tstop])
         ti = self.ti[event_idx0:event_idx1]
-        print 'have %d photons'%(len(ti))
+        print('have %d photons'%(len(ti)))
 
         # snap tstart/stop to edges of exposure
         idx_start,idx_stop = np.searchsorted(self.TSTOP,[tstart,tstop])
@@ -1606,7 +1606,7 @@ class Data(object):
 
         # there should now be a 1-1 mapping between tstart, tstop,
         # photon times, photon weights, and exposures
-        return map(Cell,cell_starts,cell_stops,exposure*(self.S/self.E),ti,self.we[event_idx0:event_idx1],[self.S/self.B]*len(cell_starts))
+        return list(map(Cell,cell_starts,cell_stops,exposure*(self.S/self.E),ti,self.we[event_idx0:event_idx1],[self.S/self.B]*len(cell_starts)))
 
     def get_cells(self,tstart=None,tstop=None,tcell=None,
             snap_edges_to_exposure=False,trim_zero_exposure=True,
@@ -1669,9 +1669,9 @@ class Data(object):
             topo_knots = np.arange(
                     self.TSTART[0]-3600,self.TSTOP[-1]+3600+3*3600+1,
                     3*3600)
-            print 'beginning barycenter for topocentric knots'
+            print('beginning barycenter for topocentric knots')
             bary_knots = topo_to_bary_converter(topo_knots)
-            print 'ending barycenter for topocentric knots'
+            print('ending barycenter for topocentric knots')
             bary_to_topo_interpolator = interp1d(bary_knots,topo_knots)
 
         if tstart is None:
@@ -1679,8 +1679,8 @@ class Data(object):
         if tstart < 100000:
             tstart = mjd2met(tstart)
         if tstart < self.TSTART[0]:
-            print 'Warning: Start time precedes start of exposure.'
-            print 'Will clip to MET=%.2f.'%(self.TSTART[0])
+            print('Warning: Start time precedes start of exposure.')
+            print('Will clip to MET=%.2f.'%(self.TSTART[0]))
             tstart = self.TSTART[0]
 
         if tstop is None:
@@ -1688,8 +1688,8 @@ class Data(object):
         if tstop < 100000:
             tstop = mjd2met(tstop)
         if tstop > self.TSTOP[-1]:
-            print 'Warning: Stop time follows end of exposure.'
-            print 'Will clip to MET=%.2f.'%(self.TSTOP[-1])
+            print('Warning: Stop time follows end of exposure.')
+            print('Will clip to MET=%.2f.'%(self.TSTOP[-1]))
             tstop = self.TSTOP[-1]
 
         if scale_series is not None:
@@ -1768,7 +1768,7 @@ class Data(object):
             event_idx = np.searchsorted(stops,times)
 
         nweights = np.bincount(event_idx,minlength=len(starts))
-        print 'nweights=',nweights.sum()
+        print('nweights=',nweights.sum())
         self._exp = exp.copy()
 
         # rescale the weights

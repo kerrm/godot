@@ -1,10 +1,10 @@
-import core; reload(core)
+from __future__ import print_function
+import core
 from core import mjd2met,met2mjd
 from load_data import get_data
 import pylab as pl
 import numpy as np
 from scipy.stats import chi2,norm
-import cPickle
 
 def set_rcParams(ticklabelsize='medium',bigticks=False):
     import matplotlib
@@ -66,7 +66,7 @@ def make_geminga_plot_first(data=None,ax=None,pulls_ax=None):
     ye = np.where(y<1,rvals_1d[:,4],rvals_1d[:,3])
     ul = rvals_1d[:,-1] == -1
     pulls = ((y-1)/ye)[~ul]
-    print np.abs(pulls).max(),len(pulls)
+    print(np.abs(pulls).max(),len(pulls))
     pulls_ax.hist(pulls,histtype='step',bins=np.linspace(-5,5,51),density=True,lw=2);
     dom = np.linspace(-5,5,1001)
     pulls_ax.plot(dom,norm.pdf(dom))
@@ -97,7 +97,7 @@ def make_new_3c279_figure(fignum=1):
 
     a = np.argmin(np.abs(np.asarray([cll.cell.get_tmid() for cll in clls_1d.clls])-mjd2met(56576.6)))
     t = clls_1d.clls[a].get_flux(profile_background=profile_background)
-    print 'Flux/TS of solar flare:',t[0],t[1]
+    print('Flux/TS of solar flare:',t[0],t[1])
 
     pl.close(fignum)
     pl.figure(fignum,(8,4.5)); pl.clf()
@@ -193,7 +193,7 @@ def make_3c279_plot(data=None,fignum=2,clobber=False):
     tstart,tstop = 57185,57193
     cells_orb = data.get_contiguous_exposure_cells(
             tstart=mjd2met(tstart),tstop=mjd2met(tstop))
-    print '%d cells in the orbital time series'%(len(cells_orb))
+    print('%d cells in the orbital time series'%(len(cells_orb)))
     clls_orb = core.CellsLogLikelihood(cells_orb,profile_background=False)
     cells_1d =  data.get_cells(tcell=86400,use_barycenter=False,
             tstart=mjd2met(tstart),tstop=mjd2met(tstop))
@@ -940,7 +940,7 @@ def make_3c279_plot_first(ax=None,profile_background=False):
 
     a = np.argmin(np.abs(np.asarray([cll.cell.get_tmid() for cll in clls_1d.clls])-mjd2met(56576.6)))
     t = clls_1d.clls[a].get_flux(profile_background=profile_background)
-    print 'Flux/TS of solar flare:',t[0],t[1]
+    print('Flux/TS of solar flare:',t[0],t[1])
 
     if ax is None:
         pl.figure(1); pl.clf()
