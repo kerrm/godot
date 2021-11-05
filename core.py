@@ -1,5 +1,5 @@
 # for some reason this needs to be first with new conda install.  gross.
-from __future__ import pxrint_function
+from __future__ import print_function
 import py_exposure_p8
 
 import numpy as np

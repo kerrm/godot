@@ -193,7 +193,7 @@ class Livetime(object):
         handles = [fits.open(ft2,memmap=False) for ft2 in ft2files]
         ft2lens = [handle['SC_DATA'].data.shape[0] for handle in handles]
         fields  = self.fields
-        arrays  = [np.empty(sum(ft2lens)) for i in xrange(len(fields))]
+        arrays  = [np.empty(sum(ft2lens)) for i in range(len(fields))]
         
         counter = 0
         for ihandle,handle in enumerate(handles):
@@ -390,14 +390,14 @@ class BinnedLivetime(Livetime):
 
     def finish(self):
         hp = Healpix(self.nside,Healpix.RING,SkyDir.EQUATORIAL)
-        ras,decs = np.asarray( [hp.py_pix2ang(i) for i in xrange(12*self.nside**2)]).transpose()
+        ras,decs = np.asarray( [hp.py_pix2ang(i) for i in range(12*self.nside**2)]).transpose()
         self.COS_HP_DEC = np.cos(decs)
         self.SIN_HP_DEC = np.sin(decs)
         self.HP_RA = ras
         ra_s,dec_s = self.RA_SCZ,self.DEC_SCZ
         ra_z,dec_z = self.RA_ZENITH,self.DEC_ZENITH
-        self.S_PIX = np.fromiter((hp.py_ang2pix(ra_s[i],dec_s[i]) for i in xrange(len(ra_s))),dtype=int)
-        self.Z_PIX = np.fromiter((hp.py_ang2pix(ra_z[i],dec_z[i]) for i in xrange(len(ra_z))),dtype=int)
+        self.S_PIX = np.fromiter((hp.py_ang2pix(ra_s[i],dec_s[i]) for i in range(len(ra_s))),dtype=int)
+        self.Z_PIX = np.fromiter((hp.py_ang2pix(ra_z[i],dec_z[i]) for i in range(len(ra_z))),dtype=int)
 
     def __init__(self,nside=59,*args,**kwargs):
         self.nside = nside
@@ -641,7 +641,7 @@ class ExposureSeries(object):
         self.t0 = (t2[-1]-t1[0])/2+1.23456789 # ad hoc epoch
         self.exposures = exposures
         if normalize:
-            for i in xrange(exposures.shape[0]):
+            for i in range(exposures.shape[0]):
                 exposures[i] /= exposures[i].sum()
         self.sorting = np.arange(len(self.times))
 
@@ -818,13 +818,13 @@ def test():
     data_aug = ip2.augment_data(data)
     dom = np.linspace(0,10,1000)
     cod = np.empty([len(dom),len(dom)])
-    for i in xrange(len(dom)):
+    for i in range(len(dom)):
         cod[i,:] = ip2([dom[i]]*len(dom),dom,data_aug.transpose())
     pl.figure(1);pl.clf();pl.imshow(data,interpolation='nearest')
     pl.figure(2);pl.clf();pl.imshow(data,interpolation='bilinear')
     pl.figure(3);pl.clf();pl.imshow(cod,interpolation='nearest',origin='upper')
     pl.axvline(500,color='k')
-    for i in xrange(len(xb)):
+    for i in range(len(xb)):
         pl.axhline(i*100,color='k')
     pl.axis([0,1000,1000,0])
 
