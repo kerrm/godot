@@ -11,17 +11,22 @@ Requires: Fermi ScienceTools
 author(s): Matthew Kerr
 """
 from __future__ import print_function
+from collections import deque
+from math import sin,cos
+import os
+from os.path import join
+
+# third-party packages
 import numpy as np
 from astropy.io import fits
-from math import sin,cos
+from scipy.interpolate import interp1d,interp2d
+
+# fermitools
 from uw.like import pycaldb
 from uw.utilities import keyword_options
 from skymaps import Gti,Healpix,SkyDir
 import skymaps
-from os.path import join
-import os
-from scipy.interpolate import interp1d,interp2d
-from collections import deque
+
 
 DEG2RAD = np.pi/180.
 
@@ -190,27 +195,18 @@ class Livetime(object):
            contibute to the exposure."""
         if self.verbose >= 1: print('Loading FT2 files...')
         if not hasattr(ft2files,'__iter__'): ft2files = [ft2files]
-        handles = [fits.open(ft2,memmap=False) for ft2 in ft2files]
-        ft2lens = [handle['SC_DATA'].data.shape[0] for handle in handles]
-        fields  = self.fields
-        arrays  = [np.empty(sum(ft2lens)) for i in range(len(fields))]
-        
-        counter = 0
-        for ihandle,handle in enumerate(handles):
+        load_data = dict()
+        for field in self.fields:
+            load_data[field] = deque()
+        for ift2file,ft2file in enumerate(ft2files):
             if self.verbose > 1:
-                print('...Loading FT2 file # %d'%(ihandle))
-            n = ft2lens[ihandle]
-            for ifield,field in enumerate(fields):
-                arrays[ifield][counter:counter+n] = handle['SC_DATA'].data.field(field)
-            handle.close()
-        ## TEMP? maybe.  Handle case where FT2 file is not sorted
-        #starts = arrays[self.fields.index('START')]
-        #a = np.argsort(starts)
-        #if not (np.all(starts==starts[a])):
-            #arrays = [x[a].copy() for x in arrays]
-        # end TEMP
-        for ifield,field in enumerate(fields):
-            self.__dict__[field] = arrays[ifield]
+                print('...Loading FT2 file # %d'%(ift2file))
+            with fits.open(ft2file,memmap=False) as handle:
+                for field in self.fields:
+                    load_data[field].append(
+                            handle['SC_DATA'].data.field(field))
+        for field in self.fields:
+            self.__dict__[field] = np.concatenate(load_data[field])
             if ('RA_' in field) or ('DEC_' in field):
                 self.__dict__[field] *= DEG2RAD
         # trim GTI to FT2 range
