@@ -2252,11 +2252,11 @@ def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
 
     # now use FFT to evaluate the various cosine moments, for the
     # maximum likelihood estimators
-    f = np.fft.rfft(W-S)[:(l/4+1)]
+    f = np.fft.rfft(W-S)[:(l//4+1)]
     WmS_cos = np.real(f)
     WmS_sin = -np.imag(f)
 
-    f = np.fft.rfft(Wb-B)[:(l/4+1)]
+    f = np.fft.rfft(Wb-B)[:(l//4+1)]
     WbmB_cos = np.real(f)
     WbmB_sin = -np.imag(f)
 
@@ -2290,7 +2290,7 @@ def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
     beta_sin = (WW_sin*WbmB_sin-WWb_sin*WmS_sin)*denom_sin
 
     if get_amps:
-        return freqs[:(l/4+1)],alpha_cos0,alpha_sin0,WW_cos,WW_sin
+        return freqs[:(l//4+1)],alpha_cos0,alpha_sin0,WW_cos,WW_sin
 
     # for all estimators, the second order correction simply removes half
     # of the value, so that multiplying by 2 gets you back to Leahy.  So
@@ -2303,8 +2303,8 @@ def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
     # this is the profile likelihood test statistic  (P_s + P_b in the paper)
     dlogl  = alpha_cos*WmS_cos + alpha_sin*WmS_sin + beta_cos*WbmB_cos + beta_sin*WbmB_sin
     if exp_only:
-        return freqs[:(l/4+1)],dlogl_nobg
-    return freqs[:(l/4+1)],dlogl_nobg,dlogl-dlogl_null,dlogl_null
+        return freqs[:(l//4+1)],dlogl_nobg
+    return freqs[:(l//4+1)],dlogl_nobg,dlogl-dlogl_null,dlogl_null
 
 def bb_prior_tune(data,tcell,bb_priors=[2,3,4,5,6,7,8,9,10],ntrial=10,
         orbital=False,**cell_kwargs):
