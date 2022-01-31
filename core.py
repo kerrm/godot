@@ -1579,8 +1579,8 @@ class Data(object):
             snap_edges_to_exposure=False,trim_zero_exposure=True,
             time_series_only=False,use_barycenter=True,
             randomize=False,scale=None,
-            scale_series=None,minimum_exposure=3e4,
-            minimum_fractional_exposure=0):
+            scale_series=None,exposure_scaler=None,
+            minimum_exposure=3e4,minimum_fractional_exposure=0):
         """ Return the starts, stops, exposures, and photon data between
             tstart and tstop.  If tcell is specified, bin data into cells
             of length tcell (s).  Otherwise, return photon-based cells.
@@ -1627,6 +1627,15 @@ class Data(object):
                 the cells.  Only valid when tcell is specified.  Use with
                 care if using short (e.g. <1d) tcell, as the intrinsic
                 exposure variation becomes large.
+
+            exposure_scaler -- a function which will take MET and give
+                a scaling factor.  This is applied to each exposure
+                interval, and the weights are re-districuted according to
+                the re-scaled exposure.  This allows for the injection of
+                a signal into the data.  (NB -- this is also removes any
+                original signal because the weights are fully shuffled
+                according to the new exposure.  A uniform rescale is
+                equivalent to randomize=True.)
 
             TODO -- implement a "use FT2 cells" feature, and a "use orbits"
             feature
@@ -1727,11 +1736,14 @@ class Data(object):
         else:
             exposure_mask = slice(0,len(starts))
 
-        if randomize:
+        if randomize or (exposure_scaler is not None):
+            scales = 1
+            if exposure_scaler is not None:
+                scales = exposure_scaler(0.5*(starts+stops))
             # NOT SURE how consistent this is with e.g.
             # minimum_fractional exposure, use with care
-            cexp = np.cumsum(exp)
-            cexp /= cexp[-1]
+            cexp = np.cumsum(exp*scales)
+            cexp *= 1./cexp[-1]
             indices = np.searchsorted(cexp,np.random.rand(len(times)))
             a = np.argsort(indices)
             times = times[a]
