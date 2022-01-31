@@ -1609,7 +1609,13 @@ class Data(object):
             scale_series -- a series of rescaling weights; the format
                 should be passed as a tuple (edges,scales) with the edges
                 giving the boundaries of the time interval of scale
-                validity; these should be contiguous
+                validity; these should be contiguous.  Times in MET.
+
+                This is useful for analyses like Cygnus X-3, there there
+                is overall "slow" source variation and a fast (orbital)
+                periodicity.  Scaling so that the weights account for the
+                slow variation (enhancing the times when it is on) improves
+                the periodicity sensitivity.
 
             minimum_exposure -- this is the minimum exposure, scaled by
                 tcell/30.  Only applied if time_series_only.
@@ -2178,6 +2184,12 @@ def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
 
     Returns: frequencies, P_0 (background fixed power spectrum), 
         P_1 (background-free spectrum), P_b (power spectrum of background)
+
+    NB that the resulting power spectrum is oversampled, at least to the
+    nearest convenient power of 2, and of course there are gaps in the
+    LAT exposure.  Therefore the oversampling can be e.g. >5x.  Thus care
+    is needed if examining the distribution of the PSD, e.g. with a KS
+    test, the effective sqrt(N) is smaller than otherwise might seem.
     """
     cells = timeseries
 
