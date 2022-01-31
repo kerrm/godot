@@ -74,7 +74,7 @@ def cell_from_cells(cells):
     return Cell(cells[0].tstart,cells[-1].tstop,exp,ti,we,cells[0].SonB)
 
 class CellTimeSeries(object):
-    """ Encapsulate binned data from Cells, specifically the exposure,
+    """ Encapsulate binned data from cells, specifically the exposure,
     the cell edges, and the first three moments of the photon weights
     (counts, weights, weights^2 in each cell.)
 
@@ -134,39 +134,6 @@ class CellTimeSeries(object):
             return self.alt_starts,self.alt_stops
         else:
             return self.starts,self.stops
-
-
-# I think this is not needed?
-class Cells(object):
-
-    def __init__(self,cells):
-        self.cells = cells
-        tm = self.tmids = np.empty(len(self.cells))
-        exp = self.exp = np.empty(len(self.cells))
-        w = self.weights = np.zeros(len(self.cells),dtype=float)
-        w2 = self.weights2 = np.zeros_like(self.weights)
-        nph = self.counts = np.zeros(len(self.cells),dtype=int)
-        mask = np.asarray([len(c.we)>0 for c in self.cells])
-        for ic,c in enumerate(self.cells):
-            exp[ic] = c.exp
-            tm[ic] = c.get_tmid()
-            if len(c.we) > 0:
-                w[ic] = np.sum(c.we)
-                w2[ic] = np.sum(c.we**2)
-                nph[ic] = len(c.we)
-
-    def __iter__(self):
-        return self.cells
-
-    def __getitem__(self,idx):
-        return self.cells[idx]
-
-    def tsamp(self):
-        # TODO -- perhaps put in a contiguity check
-        return self.cells[0].tstop-self.cells[0].tstart
-
-    def tspan(self):
-        return self.cells[-1].tstop-self.cells[0].tstart
 
 
 class CellLogLikelihood(object):
