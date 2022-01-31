@@ -459,13 +459,15 @@ def make_geminga_power_spectrum(fignum=7):
     dlogl_s = np.sort(dlogl[1:])
     dlogl_nobg_s = np.sort(dlogl_nobg[1:])
     cdf = np.arange(1,len(dlogl_s)+1).astype(float)/len(dlogl_s)
-    ax1.plot(dlogl_s,len(dlogl_s)**0.5*(cdf-chi2.cdf(dlogl_s,2)),color='C0')
-    ax1.plot(dlogl_nobg_s,len(dlogl_s)**0.5*(cdf-chi2.cdf(dlogl_nobg_s,2)),color='C1')
+    # PSD has oversampled frequencies, use a rough estimate of sample size
+    n_eff = ts.exp > 30000
+    ax1.plot(dlogl_s,n_eff*(cdf-chi2.cdf(dlogl_s,2)),color='C0')
+    ax1.plot(dlogl_nobg_s,n_eff*(cdf-chi2.cdf(dlogl_nobg_s,2)),color='C1')
     from scipy.stats import kstwobign
-    bound = kstwobign.isf(0.10)#/len(dlogl_s)**0.5
+    bound = kstwobign.isf(0.10)
     ax1.axhline(bound,color='k',alpha=0.5,ls='--')
     ax1.axhline(-bound,color='k',alpha=0.5,ls='--')
-    bound = kstwobign.isf(0.01)#/len(dlogl_s)**0.5
+    bound = kstwobign.isf(0.01)
     ax1.axhline(bound,color='k',alpha=0.5,ls='-.')
     ax1.axhline(-bound,color='k',alpha=0.5,ls='-.')
     #ax1.axis([0,40,1e-8,1])
