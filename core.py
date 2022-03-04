@@ -1055,8 +1055,26 @@ class CellsLogLikelihood(object):
 
     def plot_cells_bb(self,tsmin=4,fignum=2,clear=True,color='C3',
             plot_raw_cells=True,bb_prior=4,plot_years=False,
-            no_bb=False,log_scale=False,
-            plot_phase=False,ax=None):
+            no_bb=False,no_ts=True,log_scale=False,
+            plot_phase=False,ax=None,labelsize='large'):
+        """ Generate a plot showing fluxes both from the raw cells and from
+            a Bayesian blocks partition which is computed using the input
+            prior.
+
+            Parameters:
+            tsmin -- plot upper limits if cells/partition TS is <tsmin
+            fignum -- matplotlib figure number to use
+            clear -- clear previous matplotlib figure
+            color -- [WARNING -- NOT USED?]
+            plot_raw_cells -- if False, do not plot underyling  fluxes
+            bb_prior -- exponential prior for BB algorithm
+            plot_years -- if True, scale data to years; default is days
+            no_bb -- do not run/plot/return Bayesian Blocks results
+            no_ts -- do not include TS values in return
+            log_scale -- set y-axis scale to log
+            plot_phase -- interpret times as phase [0,1) instead
+            ax -- use provided instance to plot on
+        """
 
         # NB might want to use a CellsLogLikelihood to avoid overhead of 3x
         # size on BB computation
@@ -1072,7 +1090,7 @@ class CellsLogLikelihood(object):
             ax.set_yscale('log')
         if plot_raw_cells:
             # time, terr, yval, yerrlo,yerrhi; yerrhi=-1 if upper limit
-            rvals = np.empty([len(self.clls),5])
+            rvals = np.empty([len(self.clls),5 if no_ts else 6])
             for icll,cll in enumerate(self.clls):
                 if cll.S==0:
                     rvals[icll] = np.nan
@@ -1087,14 +1105,22 @@ class CellsLogLikelihood(object):
                         terr *= 1./365
                 aopt,ts,xconf = self.get_flux(icll,conf=[0.16,0.84])
                 if ts <= tsmin:
-                    rvals[icll] = tmid,terr,xconf[1],0,-1
+                    if no_ts:
+                        rvals[icll] = tmid,terr,xconf[1],0,-1
+                    else:
+                        rvals[icll] = tmid,terr,xconf[1],0,-1,ts
                 else:
-                    rvals[icll] = tmid,terr,aopt,aopt-xconf[0],xconf[1]-aopt
+                    if no_ts:
+                        rvals[icll] = tmid,terr,aopt,aopt-xconf[0],xconf[1]-aopt
+                    else:
+                        rvals[icll] = tmid,terr,aopt,aopt-xconf[0],xconf[1]-aopt,ts
             ul_mask = (rvals[:,-1] == -1) & (~np.isnan(rvals[:,-1]))
             t = rvals[ul_mask].transpose()
-            ax.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C0',alpha=0.2,ls=' ',ms=3)
+            ax.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,
+                    marker=None,color='C0',alpha=0.2,ls=' ',ms=3)
             t = rvals[~ul_mask].transpose()
-            ax.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',color='C0',alpha=0.2,ls=' ',ms=3)
+            ax.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',
+                    color='C0',alpha=0.2,ls=' ',ms=3)
         else:
             rvals = None
 
@@ -1104,7 +1130,7 @@ class CellsLogLikelihood(object):
             print(var_ts,var_dof)
             print('Variability significance: ',chi2.sf(var_ts,var_dof))
             bb_idx = np.append(bb_idx,len(self.cells))
-            rvals_bb = np.empty([len(bb_idx)-1,5])
+            rvals_bb = np.empty([len(bb_idx)-1,5 if no_ts else 6])
             for ibb,(start,stop) in enumerate(zip(bb_idx[:-1],bb_idx[1:])):
                 cells = cell_from_cells(self.cells[start:stop])
                 cll = CellLogLikelihood(cells)
@@ -1123,26 +1149,34 @@ class CellsLogLikelihood(object):
                 aopt,ts,xconf = cll.get_flux(conf=[0.16,0.84],
                         profile_background=self.profile_background)
                 if ts <= tsmin:
-                    rvals_bb[ibb] = tmid,terr,xconf[1],0,-1
+                    if no_ts:
+                        rvals_bb[ibb] = tmid,terr,xconf[1],0,-1
+                    else:
+                        rvals_bb[ibb] = tmid,terr,xconf[1],0,-1,ts
                 else:
-                    rvals_bb[ibb] = tmid,terr,aopt,aopt-xconf[0],xconf[1]-aopt
+                    if no_ts:
+                        rvals_bb[ibb] = tmid,terr,aopt,aopt-xconf[0],xconf[1]-aopt
+                    else:
+                        rvals_bb[ibb] = tmid,terr,aopt,aopt-xconf[0],xconf[1]-aopt,ts
 
             ul_mask = (rvals_bb[:,-1] == -1) & (~np.isnan(rvals_bb[:,-1]))
             t = rvals_bb[ul_mask].transpose()
-            ax.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C3',alpha=0.8,ls=' ',ms=3)
+            ax.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,
+                    color='C3',alpha=0.8,ls=' ',ms=3)
             t = rvals_bb[~ul_mask].transpose()
-            ax.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',color='C3',alpha=0.8,ls=' ',ms=3)
+            ax.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',color='C3',
+                    alpha=0.8,ls=' ',ms=3)
         else:
             rvals_bb=None
 
         if plot_phase:
-            ax.set_xlabel('Pulse Phase')
+            ax.set_xlabel('Pulse Phase',size=labelsize)
             ax.axis([0,1,pl.axis()[2],pl.axis()[3]])
         elif plot_years:
-            ax.set_xlabel('Year')
+            ax.set_xlabel('Year',size=labelsize)
         else:
-            ax.set_xlabel('MJD')
-        ax.set_ylabel('Relative Flux Density')
+            ax.set_xlabel('MJD',size=labelsize)
+        ax.set_ylabel('Relative Flux Density',size=labelsize)
         return rvals,rvals_bb
 
     def get_bb_lightcurve(self,tsmin=4,plot_years=False,plot_phase=False,
@@ -2182,7 +2216,8 @@ def power_spectrum_dft(cll,freqs,unweighted=False):
     return rvals
 
 def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
-        exp_only=False,get_amps=False,exposure_correction=None):
+        exp_only=False,get_amps=False,exposure_correction=None,
+        no_zero_pad=False):
     """ Use FFT to evalute the sums in the maximum likelihood expression.
 
     This version matches the notation in the paper.
@@ -2229,6 +2264,8 @@ def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
         dfgoal = 0.2/cells.tspan()
     nfft = 1./(cells.tsamp()*dfgoal)
     l = 2**(int(np.log2(nfft))+1)
+    if no_zero_pad:
+        l = len(W)
     zeros = np.zeros(l-len(W))
 
     # zero pad
