@@ -1423,6 +1423,12 @@ class Data(object):
             else:
                 if f['events'].header['timeref'] != timeref:
                     raise Exception('Different time systems!')
+            # sanity check for weights computation
+            try:
+                f['events'].data.field(weight_col)
+            except KeyError:
+                print(f'FT1 file {ft1} did not have weights column {weight_col}!  Skipping.')
+                continue
             if max_radius is not None:
                 ra = np.radians(f['events'].data.field('ra'))
                 dec = np.radians(f['events'].data.field('dec'))
@@ -2232,11 +2238,18 @@ def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
     Returns: frequencies, P_0 (background fixed power spectrum), 
         P_1 (background-free spectrum), P_b (power spectrum of background)
 
+    NB: The resulting power spectrum extends only halfway to the Nyquist
+    frequency of the input time series because the "upper half" of the
+    frequencies are used in the correction needed to correct to Leahy
+    normalization.
+
     NB that the resulting power spectrum is oversampled, at least to the
     nearest convenient power of 2, and of course there are gaps in the
     LAT exposure.  Therefore the oversampling can be e.g. >5x.  Thus care
     is needed if examining the distribution of the PSD, e.g. with a KS
     test, the effective sqrt(N) is smaller than otherwise might seem.
+
+    Use no_zero_pad to return ia critically sampled power spectrum.
     """
     cells = timeseries
 
