@@ -10,7 +10,6 @@ Requires: Fermi ScienceTools
 
 author(s): Matthew Kerr
 """
-from __future__ import print_function
 from collections import deque
 from math import sin,cos
 import os
@@ -22,13 +21,14 @@ from astropy.io import fits
 from scipy.interpolate import interp1d,interp2d
 
 # fermitools
-from uw.like import pycaldb
-from uw.utilities import keyword_options
-from skymaps import Gti,Healpix,SkyDir
-import skymaps
+import pycaldb
+import keyword_options
+from gti import Gti
 
 
 DEG2RAD = np.pi/180.
+EQUATORIAL = 1
+GALACTIC = 0
 
 class Binning(object):
     """ Specify the binning for a livetime calculation."""
@@ -318,7 +318,7 @@ class Livetime(object):
         acosines -- cosines of azimuthal angles [optional]
         """    
         ra_s,ra_z = self.RA_SCZ,self.RA_ZENITH
-        cdec,sdec = cos(dec),sin(dec)
+        cdec,sdec = np.cos(dec),np.sin(dec)
         # cosine(polar angle) of source in S/C system
         pcosines  = self.COS_DEC_SCZ*cdec*np.cos(ra-self.RA_SCZ) + self.SIN_DEC_SCZ*sdec
         mask = pcosines >= theta_cut
@@ -385,7 +385,7 @@ class BinnedLivetime(Livetime):
     """
 
     def finish(self):
-        hp = Healpix(self.nside,Healpix.RING,SkyDir.EQUATORIAL)
+        hp = Healpix(self.nside,Healpix.RING,EQUATORIAL)
         ras,decs = np.asarray( [hp.py_pix2ang(i) for i in range(12*self.nside**2)]).transpose()
         self.COS_HP_DEC = np.cos(decs)
         self.SIN_HP_DEC = np.sin(decs)
@@ -396,14 +396,15 @@ class BinnedLivetime(Livetime):
         self.Z_PIX = np.fromiter((hp.py_ang2pix(ra_z[i],dec_z[i]) for i in range(len(ra_z))),dtype=int)
 
     def __init__(self,nside=59,*args,**kwargs):
+        raise NotImplementedError('This needs a replacement for Healpix.')
         self.nside = nside
         super(BinnedLivetime,self).__init__(*args,**kwargs)
 
     def get_cosines(self,skydir):
-        ra,dec    = N.radians([skydir.ra(),skydir.dec()])
+        ra,dec    = np.radians([skydir.ra(),skydir.dec()])
 
         # calculate the arclengths to the various Healpix
-        cosines  = self.COS_HP_DEC*cos(dec)*np.cos(ra-self.HP_RA) + self.SIN_HP_DEC*sin(dec)
+        cosines  = self.COS_HP_DEC*np.cos(dec)*np.cos(ra-self.HP_RA) + self.SIN_HP_DEC*np.sin(dec)
         scosines = cosines[self.S_PIX]
         if self.zenithcut > -1:
             zcosines = cosines[self.Z_PIX]
@@ -437,7 +438,7 @@ class EfficiencyCorrection(object):
             self.v3 = [-1.527,  6.112, -0.844, 2.877, -0.133, 4.593]  # p0, back
             self.v4 = [ 1.413, -4.628,  0.773, 2.864,  0.126, 4.592]  # p1, back
 
-    def __init__(self,irf='P7SOURCE_V6',e=1000):
+    def __init__(self,irf='P8R3_SOURCE_V3',e=1000):
         cdbm = pycaldb.CALDBManager(irf)
         #ct0_file,ct1_file = get_irf_file(irf)
         ct0_file,ct1_file = cdbm.get_aeff()
@@ -520,7 +521,7 @@ class EffectiveArea(object):
     defaults = (
         #('irf','P6_v3_diff','IRF to use'),
         #('irf','P7SOURCE_V6','IRF to use'),
-        ('irf','P8R2_SOURCE_V6','IRF to use'),
+        ('irf','P8R3_SOURCE_V3','IRF to use'),
         ('CALDB',None,'path to override environment variable'),
         ('use_phidep',False,'use azmithual dependence for effective area')
         )
@@ -597,6 +598,44 @@ class EffectiveArea(object):
 
     def get_file_names(self):
         return self.ct0_file,self.ct1_file
+
+    def image(self,event_class=-1,logea=False,fig_base=2,ctheta=0.99,show_image=False):
+
+        if event_class < 0: effarea = self.feffarea + self.beffarea
+        elif event_class == 0: effarea = self.feffarea
+        else: effarea = self.beffarea
+        ebins,cbins = self.ebins,self.cbins
+
+        import pylab as pl
+
+        if show_image:
+            #Generate a pseudo-color plot of the full effective area
+            pl.figure(fig_base);pl.clf()
+            pl.gca().set_xscale('log')
+            if logea: pl.gca().set_yscale('log')
+            pl.pcolor((ebins[:-1]*ebins[1:])**0.5,(cbins[:-1]+cbins[1:])/2.,effarea.reshape(len(cbins)-1,len(ebins)-1))
+            pl.title('Effective Area')
+            pl.xlabel('$\mathrm{Energy\ (MeV)}$')
+            pl.ylabel('$\mathrm{cos( \theta)}$')
+            cb = pl.colorbar()
+            cb.set_label('$\mathrm{Effective\ Area\ (m^2)}$')
+
+        #Generate a plot of the on-axis effective area with and without interpolation
+        energies = np.logspace(np.log10(ebins[0]),np.log10(ebins[-1]),8*(len(ebins)-1)+1)
+        f_vals,b_vals = np.array([self(e,ctheta,bilinear=True) for e in energies]).transpose()
+        pl.figure(fig_base+2);pl.clf()
+        pl.gca().set_xscale('log')
+        if logea: pl.gca().set_yscale('log')
+        pl.plot(energies,f_vals,label='front bilinear interp.',color='blue')
+        pl.plot(energies,b_vals,label='back bilinear interp.',color='red')
+        f_vals,b_vals = np.array([self(e,ctheta,bilinear=False) for e in energies]).transpose()
+        pl.plot(energies,f_vals,label='front nearest-neighbour interp.',color='blue')
+        pl.plot(energies,b_vals,label='back nearest-neighbour interp.',color='red')
+        pl.title('On-axis Effective Area')
+        pl.xlabel('$\mathrm{Energy\ (MeV)}$')
+        pl.ylabel('$\mathrm{Effective\ Area\ (cm^2)}$')
+        pl.legend(loc = 'lower right')
+        pl.grid()
 
 class Exposure(object):
     """ Integrate effective area and livetime over incidence angle."""
@@ -706,7 +745,7 @@ class ExposureSeriesFactory(object):
     """
 
     defaults = (
-        ('irf','P7SOURCE_V6','IRF to use'),
+        ('irf','P8_SOURCE_V3','IRF to use'),
         ('zenith_cut',-1,'cut on cosine(zenith angle)'),
         ('theta_cut',0.2,'cut on cosine(incidence angle)'),
         ('eff_corr',True,'if True, apply correction for ghost events'),
@@ -756,50 +795,6 @@ class ExposureSeriesFactory(object):
                 exposure[ien,:] = self.lt.LIVETIME[mask]
         return ExposureSeries(self.lt.START[mask],self.lt.STOP[mask],exposures)
 
-def image(ea,event_class=-1,logea=False,fig_base=2,ctheta=0.99,show_image=False):
-
-    self = ea
-    if event_class < 0: effarea = self.feffarea + self.beffarea
-    elif event_class == 0: effarea = self.feffarea
-    else: effarea = self.beffarea
-    ebins,cbins = self.ebins,self.cbins
-
-    import pylab as pl
-
-    if show_image:
-        #Generate a pseudo-color plot of the full effective area
-        pl.figure(fig_base);pl.clf()
-        pl.gca().set_xscale('log')
-        if logea: pl.gca().set_yscale('log')
-        pl.pcolor((ebins[:-1]*ebins[1:])**0.5,(cbins[:-1]+cbins[1:])/2.,effarea.reshape(len(cbins)-1,len(ebins)-1))
-        pl.title('Effective Area')
-        pl.xlabel('$\mathrm{Energy\ (MeV)}$')
-        pl.ylabel('$\mathrm{cos( \theta)}$')
-        cb = pl.colorbar()
-        cb.set_label('$\mathrm{Effective\ Area\ (m^2)}$')
-
-    #Generate a plot of the on-axis effective area with and without interpolation
-    energies = np.logspace(np.log10(ebins[0]),np.log10(ebins[-1]),8*(len(ebins)-1)+1)
-    f_vals,b_vals = np.array([self(e,ctheta,bilinear=True) for e in energies]).transpose()
-    f_ea = skymaps.EffectiveArea('%s_front'%(ea.irf))
-    b_ea = skymaps.EffectiveArea('%s_back'%(ea.irf))
-    check_fvals = np.asarray([f_ea(e,ctheta) for e in energies])
-    check_bvals = np.asarray([b_ea(e,ctheta) for e in energies])
-    pl.figure(fig_base+2);pl.clf()
-    pl.gca().set_xscale('log')
-    if logea: pl.gca().set_yscale('log')
-    pl.plot(energies,f_vals,label='front bilinear interp.',color='blue')
-    pl.plot(energies,check_fvals,color='k',ls='--')
-    pl.plot(energies,b_vals,label='back bilinear interp.',color='red')
-    pl.plot(energies,check_bvals,color='k',ls='--')
-    f_vals,b_vals = np.array([self(e,ctheta,bilinear=False) for e in energies]).transpose()
-    pl.plot(energies,f_vals,label='front nearest-neighbour interp.',color='blue')
-    pl.plot(energies,b_vals,label='back nearest-neighbour interp.',color='red')
-    pl.title('On-axis Effective Area')
-    pl.xlabel('$\mathrm{Energy\ (MeV)}$')
-    pl.ylabel('$\mathrm{Effective\ Area\ (cm^2)}$')
-    pl.legend(loc = 'lower right')
-    pl.grid()
 
 def test():
     import pylab as pl

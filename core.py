@@ -1670,7 +1670,7 @@ class Data(object):
 
             exposure_scaler -- a function which will take MET and give
                 a scaling factor.  This is applied to each exposure
-                interval, and the weights are re-districuted according to
+                interval, and the weights are re-distributed according to
                 the re-scaled exposure.  This allows for the injection of
                 a signal into the data.  (NB -- this is also removes any
                 original signal because the weights are fully shuffled
@@ -1684,13 +1684,13 @@ class Data(object):
         ft1_is_bary = self.timeref == 'SOLARSYSTEM'
         if use_barycenter:
             topo_to_bary_converter = BaryConverter(self.ft2files[0],self.ra,self.dec)
-            # generate a set of knots in topocentric time with reasonable
-            # time resolution -- I reckon three hours should be a gracious
-            # plenty; add a little slop onto the ends
+            # generate a set of knots in topocentric time.  Currently this is
+            # one hour, which does not resolve geocentric times.  Slop at ends.
             nknots = int((self.TSTOP[-1]-self.TSTART[0])/(3600*3))
             topo_knots = np.arange(
                     self.TSTART[0]-3600,self.TSTOP[-1]+3600+3*3600+1,
                     3*3600)
+            print('Warning!  Current resolution is too poor for the geocentric correction and so will produce ~40ms smearing.')
             print('beginning barycenter for topocentric knots')
             bary_knots = topo_to_bary_converter(topo_knots)
             print('ending barycenter for topocentric knots')
@@ -1779,7 +1779,7 @@ class Data(object):
         if randomize or (exposure_scaler is not None):
             scales = 1
             if exposure_scaler is not None:
-                scales = exposure_scaler(0.5*(starts+stops))
+                scales = exposure_scaler(starts,stops)
             # NOT SURE how consistent this is with e.g.
             # minimum_fractional exposure, use with care
             cexp = np.cumsum(exp*scales)
