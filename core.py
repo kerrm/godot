@@ -104,7 +104,7 @@ class CellTimeSeries(object):
         ## exposure mask
         self.minimum_exposure = minimum_exposure
         mask = ~(exp > minimum_exposure)
-        print('exposure filter %d/%d:'%(mask.sum(),len(mask)))
+        #print('exposure filter %d/%d:'%(mask.sum(),len(mask)))
         self.exp[mask] = 0
         self.sexp[mask] = 0
         self.bexp[mask] = 0
@@ -1262,6 +1262,7 @@ class Data(object):
         self.ft2files = ft2files
         self.max_radius = max_radius
         self.ra,self.dec = ra,dec
+        self._warned = False
 
         if tstart is not None:
             if tstart < 100000:
@@ -1620,15 +1621,20 @@ class Data(object):
             time_series_only=False,use_barycenter=True,
             randomize=False,scale=None,
             scale_series=None,exposure_scaler=None,
-            minimum_exposure=3e4,minimum_fractional_exposure=0):
+            minimum_exposure=3e4,minimum_fractional_exposure=0,
+            quiet=False):
         """ Return the starts, stops, exposures, and photon data between
             tstart and tstop.  If tcell is specified, bin data into cells
             of length tcell (s).  Otherwise, return photon-based cells.
 
             snap_edges_to_exposure -- move the edges of the returned cells
-            to align with the resolution of the underlying FT2 file; this
-            basically cuts out dead time, and is potentially useful if
-            tcell is a few hours or less. [NOT IMPLEMENTED]
+                to align with the resolution of the underlying FT2 file; 
+                this basically cuts out dead time, and is potentially
+                useful if tcell is a few hours or less. [NOT IMPLEMENTED]
+
+            trim_zero_exposure -- remove Cells that have 0 exposure.  good
+                for things like Bayesian Block analyses, VERY BAD for
+                frequency-domain analyses!
 
             time_series_only -- don't return Cells, but a list of time
                 series: starts, stops, exposure, cts, sum(weights), 
@@ -1638,7 +1644,9 @@ class Data(object):
                 generate a set of nonuniform edges in the topocenter and
                 use this for binning/exposure calculation; NB that in
                 general one would *not* use barycentered event times
-                in this case
+                in this case.  ALSO note that this calculation is approx.
+                because it (almost always) assumes that the S/C is at the
+                geocenter, so will be out by up to 40ms.
 
             randomize -- shuffle times and weights so that they follow
                 the exposure but lose all time ordering; useful for
@@ -1683,17 +1691,26 @@ class Data(object):
         """
         ft1_is_bary = self.timeref == 'SOLARSYSTEM'
         if use_barycenter:
-            topo_to_bary_converter = BaryConverter(self.ft2files[0],self.ra,self.dec)
-            # generate a set of knots in topocentric time.  Currently this is
-            # one hour, which does not resolve geocentric times.  Slop at ends.
+            # NB -- this uses just a single, short FT2 file, so most of
+            # the calls to the orbit file will actually return (0,0,0)
+            # i.e. the geocenter.  That's why there's no point in trying
+            # to resolve orbital motion.
+            topo_to_bary_converter = BaryConverter(
+                    self.ft2files[0],self.ra,self.dec)
+            # generate a set of knots in topocentric time.  Currently 
+            # this is three hours.  (See above note about geocentering.)
             nknots = int((self.TSTOP[-1]-self.TSTART[0])/(3600*3))
             topo_knots = np.arange(
                     self.TSTART[0]-3600,self.TSTOP[-1]+3600+3*3600+1,
                     3*3600)
-            print('Warning!  Current resolution is too poor for the geocentric correction and so will produce ~40ms smearing.')
-            print('beginning barycenter for topocentric knots')
+            if (not quiet) and (not self._warned):
+                print('Warning!  This formulation does not account for travel time around the earth; all conversions done for geocenter.')
+                self._warned = True
+            if not quiet:
+                print('beginning barycenter for topocentric knots')
             bary_knots = topo_to_bary_converter(topo_knots)
-            print('ending barycenter for topocentric knots')
+            if not quiet:
+                print('ending barycenter for topocentric knots')
             bary_to_topo_interpolator = interp1d(bary_knots,topo_knots)
 
         if tstart is None:
@@ -1793,7 +1810,6 @@ class Data(object):
             event_idx = np.searchsorted(stops,times)
 
         nweights = np.bincount(event_idx,minlength=len(starts))
-        print('nweights=',nweights.sum())
         self._exp = exp.copy()
 
         # rescale the weights
@@ -2316,6 +2332,10 @@ def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
     WWb_cos  = 0.5*(SB+np.real(f)[::2])
     WWb_sin  = 0.5*(SB-np.real(f)[::2])
 
+    # Eliminate 0 entries to avoid error messages
+    WW_sin[0] = 1.
+    WbWb_sin[0] = 1.
+
     # form non-coupled estimators first
     alpha_cos0 = WmS_cos/WW_cos
     alpha_sin0 = WmS_sin/WW_sin
@@ -2325,6 +2345,7 @@ def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
     # coupled estimators
     denom_cos = 1./(WW_cos*WbWb_cos-WWb_cos**2)
     denom_sin = 1./(WW_sin*WbWb_sin-WWb_sin**2)
+    denom_sin[0] = 0.
     alpha_cos = (WbWb_cos*WmS_cos-WWb_cos*WbmB_cos)*denom_cos
     alpha_sin = (WbWb_sin*WmS_sin-WWb_sin*WbmB_sin)*denom_sin
     beta_cos = (WW_cos*WbmB_cos-WWb_cos*WmS_cos)*denom_cos
