@@ -11,8 +11,7 @@ from scipy.interpolate import interp1d
 from scipy.stats import chi2
 from astropy.io import fits
 
-
-from uw.pulsar.timeman import BaryConverter
+import bary
 
 # MET bounds for 8-year data set used for FL8Y and 4FGL
 t0_8year = 239557007.6
@@ -1262,7 +1261,7 @@ class Data(object):
         self.ft2files = ft2files
         self.max_radius = max_radius
         self.ra,self.dec = ra,dec
-        self._warned = False
+        self._barycon = None
 
         if tstart is not None:
             if tstart < 100000:
@@ -1364,6 +1363,11 @@ class Data(object):
         self.S = np.sum(self.we)
         self.B = len(self.we)-self.S
 
+    def __setstate__(self,state):
+        if not '_barycon' in state:
+            state['_barycon'] = None
+        self.__dict__.update(state)
+
     def _get_weighted_aeff(self,pcosines,phi,base_spectrum=None,
             use_event_weights=False,livetime=None):
         ea = py_exposure_p8.EffectiveArea(
@@ -1464,6 +1468,27 @@ class Data(object):
         data = [(np.concatenate(d)[idx]).copy() for d in deques]
         self.other_data_cols = cols[2:]
         return data,timeref,idx
+
+    def _bary2topo(self,bary_times,quiet=True):
+        if self._barycon is not None:
+            print('Using cached interpolator.')
+            return self._barycon(bary_times)
+        # Ignores Fermi position, so just gives barycenter time to
+        # +/- 20ms accuracy.
+        # Generate a set of knots in topocentric time, currently 3hr.  
+        knot_space = 3600*3
+        topo_knots = np.arange(
+                self.TSTART[0]-2*knot_space,self.TSTOP[-1]+2*knot_space+1,
+                knot_space)
+        if (not quiet):
+            print('Warning!  This formulation does not account for travel time around the earth; all conversions done for geocenter.')
+        if not quiet:
+            print('beginning barycenter for topocentric knots')
+        bary_knots = bary.met2tdb(topo_knots,self.ra,self.dec)
+        if not quiet:
+            print('ending barycenter for topocentric knots')
+        self._barycon = interp1d(bary_knots,topo_knots,bounds_error=True)
+        return self._barycon(bary_times)
 
     def get_exposure(self,times):
         """ Return the cumulative exposure at the given times.
@@ -1690,28 +1715,6 @@ class Data(object):
 
         """
         ft1_is_bary = self.timeref == 'SOLARSYSTEM'
-        if use_barycenter:
-            # NB -- this uses just a single, short FT2 file, so most of
-            # the calls to the orbit file will actually return (0,0,0)
-            # i.e. the geocenter.  That's why there's no point in trying
-            # to resolve orbital motion.
-            topo_to_bary_converter = BaryConverter(
-                    self.ft2files[0],self.ra,self.dec)
-            # generate a set of knots in topocentric time.  Currently 
-            # this is three hours.  (See above note about geocentering.)
-            nknots = int((self.TSTOP[-1]-self.TSTART[0])/(3600*3))
-            topo_knots = np.arange(
-                    self.TSTART[0]-3600,self.TSTOP[-1]+3600+3*3600+1,
-                    3*3600)
-            if (not quiet) and (not self._warned):
-                print('Warning!  This formulation does not account for travel time around the earth; all conversions done for geocenter.')
-                self._warned = True
-            if not quiet:
-                print('beginning barycenter for topocentric knots')
-            bary_knots = topo_to_bary_converter(topo_knots)
-            if not quiet:
-                print('ending barycenter for topocentric knots')
-            bary_to_topo_interpolator = interp1d(bary_knots,topo_knots)
 
         if tstart is None:
             tstart = self.TSTART[0]
@@ -1742,7 +1745,7 @@ class Data(object):
             scale_series = [new_edges,new_scales]
 
         if use_barycenter:
-            tstart,tstop = topo_to_bary_converter([tstart,tstop])
+            tstart,tstop = bary.met2tdb([tstart,tstop],self.ra,self.dec)
 
         if tcell is None:
             return self.get_photon_cells(tstart,tstop)
@@ -1754,7 +1757,7 @@ class Data(object):
 
         edges = tstart + np.arange(ncell+1)*tcell
         if use_barycenter:
-            topo_edges = bary_to_topo_interpolator(edges)
+            topo_edges = self._bary2topo(edges)
             bary_edges = edges
         else:
             topo_edges = edges
