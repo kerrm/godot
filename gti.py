@@ -1,3 +1,4 @@
+# TODO -- finish implementing combine and add a test
 from collections import deque
 
 from astropy.io import fits
@@ -32,6 +33,19 @@ class _Gti():
     def accept(self,t):
         idx = np.minimum(np.searchsorted(self._t1,t),len(self._t1)-1)
         return (self._t0[idx] <= t) & (self._t1[idx] > t)
+
+    def combine(self,other):
+        if other._t1[-1] < self._t0[0]:
+            # other is entirely before us
+            self._t0 = np.append(other._t0,self._t0)
+            self._t1 = np.append(other._t1,self._t1)
+        elif other._t0[0] > self._t1[-1]:
+            # other is entirely after us
+            self._t0 = np.append(self._t0,other._t0)
+            self._t1 = np.append(self._t1,other._t1)
+        else:
+            # there is a non-trivial intersection
+            raise NotImplementedError
 
     def intersection(self,other):
         """ Defined via SWIG in the old days to get &=.
@@ -137,3 +151,4 @@ def test_Gti():
     assert(np.allclose(g2.get_edges(True),cg1.get_edges(True)))
     assert(np.allclose(g2._t1,cg1.get_edges(False)))
     assert(np.allclose(g2.get_edges(False),cg1.get_edges(False)))
+
