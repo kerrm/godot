@@ -106,7 +106,7 @@ class Livetime(object):
         """ Take the union of all GTIs provided by FT1 files, then take an 
             intersection with the (optional) gti_mask and the time limits.
         """
-        if self.verbose >= 1: print('Processing GTI...')
+        if self.verbose >= 2: print('Processing GTI...')
         if not hasattr(ft1files,'__iter__'): ft1files = [ft1files]
         gti = self.gti = Gti(ft1files[0])
         if len(ft1files) > 1:
@@ -193,7 +193,7 @@ class Livetime(object):
     def _setup_ft2(self,ft2files):
         """Load in the FT2 data.  Optionally, mask out values that will not
            contibute to the exposure."""
-        if self.verbose >= 1: print('Loading FT2 files...')
+        if self.verbose >= 2: print('Loading FT2 files...')
         if not hasattr(ft2files,'__iter__'): ft2files = [ft2files]
         load_data = dict()
         for field in self.fields:
@@ -225,7 +225,7 @@ class Livetime(object):
         if self.verbose > 1: print('Finished loading FT2 files!')
   
     def _process_ft2(self):
-        if self.verbose >= 1: print('Processing the FT2 file (calculating overlap with GTI)...')
+        if self.verbose >= 2: print('Processing the FT2 file (calculating overlap with GTI)...')
         func = self._process_ft2_fast if self.fast_ft2 else \
                self._process_ft2_slow
         overlaps = func(self.gti_starts,self.gti_stops)
@@ -372,7 +372,8 @@ class Livetime(object):
         event_idx = np.searchsorted(self.gti_stops,timestamps)
         mask = event_idx < len(self.gti_stops)
         mask[mask] = timestamps > self.gti_starts[event_idx[mask]]
-        print('gti mask: %d/%d'%(mask.sum(),len(mask)))
+        if self.verbose >= 1:
+            print('gti mask: %d/%d'%(mask.sum(),len(mask)))
         return mask
 
 class BinnedLivetime(Livetime):

@@ -1241,7 +1241,8 @@ class Data(object):
             zenith_cut=90,minimum_exposure=3e4,use_phi=True,
             base_spectrum=None,use_weights_for_exposure=False,
             weight_cut=1,max_radius=None,bary_ft1files=None,
-            tstart=None,tstop=None,apply_8year_scale=False):
+            tstart=None,tstop=None,apply_8year_scale=False,
+            verbosity=1):
         """ The FT1 files, FT2 files;
             ra, dec of source (deg)
             weight_cut -- fraction of source photons to retain
@@ -1262,6 +1263,7 @@ class Data(object):
         self.max_radius = max_radius
         self.ra,self.dec = ra,dec
         self._barycon = None
+        self._verbosity = verbosity
 
         if tstart is not None:
             if tstart < 100000:
@@ -1271,7 +1273,7 @@ class Data(object):
                 tstop = mjd2met(tstop)
         
         lt = py_exposure_p8.Livetime(ft2files,ft1files,
-                tstart=tstart,tstop=tstop)
+                tstart=tstart,tstop=tstop,verbose=verbosity)
         mask,pcosines,acosines = lt.get_cosines(
                 np.radians(ra),np.radians(dec),
                 theta_cut=0.4,zenith_cut=np.cos(np.radians(zenith_cut)),
@@ -1443,7 +1445,8 @@ class Data(object):
         # cosine(polar angle) of source in S/C system
                 cosines  = cdec_src*np.cos(dec)*np.cos(ra-np.radians(self.ra)) + sdec_src*np.sin(dec)
                 mask = cosines >= np.cos(np.radians(max_radius))
-                print('keeping %d/%d photons for radius cut'%(mask.sum(),len(mask)))
+                if (self._verbosity >= 2):
+                    print('keeping %d/%d photons for radius cut'%(mask.sum(),len(mask)))
             else:
                 mask = slice(0,f['events'].header['naxis2'])
             for c,d in zip(cols,deques):
@@ -1459,7 +1462,8 @@ class Data(object):
         #ti = ti[a] # I think this was incorrect
         # the argsort mask order 
         if (tstart is not None) and (tstop is not None):
-            print('applying time cut')
+            if self._verbosity >= 2:
+                print('applying time cut')
             tstart = tstart or 0
             tstop = tstop or 999999999
             idx = a[(ti >= tstart) & (ti <= tstop)]
@@ -1471,7 +1475,8 @@ class Data(object):
 
     def _bary2topo(self,bary_times,quiet=True):
         if self._barycon is not None:
-            print('Using cached interpolator.')
+            if not quiet:
+                print('Using cached interpolator.')
             return self._barycon(bary_times)
         # Ignores Fermi position, so just gives barycenter time to
         # +/- 20ms accuracy.
