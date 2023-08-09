@@ -1,21 +1,21 @@
-# for some reason this needs to be first with new conda install.  gross.
-from __future__ import print_function
-import py_exposure_p8
+from collections import deque
 
+from astropy.io import fits
 import numpy as np
 import pylab as pl
-from collections import deque
 from scipy.integrate import simps,cumtrapz
 from scipy.optimize import fmin,fsolve,fmin_tnc,brentq
 from scipy.interpolate import interp1d
 from scipy.stats import chi2
-from astropy.io import fits
 
 import bary
+import py_exposure_p8
 
 # MET bounds for 8-year data set used for FL8Y and 4FGL
 t0_8year = 239557007.6
 t1_8year = 491999980.6
+
+dbug = dict()
 
 def met2mjd(times,mjdref=51910+7.428703703703703e-4):
     times = np.asarray(times,dtype=np.float128)
@@ -114,6 +114,12 @@ class CellTimeSeries(object):
     def tsamp(self):
         # TODO -- perhaps put in a contiguity check
         return self.stops[0]-self.starts[0]
+
+    def ps_nbin(self):
+        """ Return the expected number of frequency bins in the likelihood
+            PSD, with no zero padding.
+        """
+        return len(self.starts)//4 + 1
 
     def tspan(self):
         return self.stops[-1]-self.starts[0]
@@ -1649,7 +1655,7 @@ class Data(object):
     def get_cells(self,tstart=None,tstop=None,tcell=None,
             snap_edges_to_exposure=False,trim_zero_exposure=True,
             time_series_only=False,use_barycenter=True,
-            randomize=False,scale=None,
+            randomize=False,seed=None,scale=None,
             scale_series=None,exposure_scaler=None,
             minimum_exposure=3e4,minimum_fractional_exposure=0,
             quiet=False):
@@ -1681,6 +1687,8 @@ class Data(object):
             randomize -- shuffle times and weights so that they follow
                 the exposure but lose all time ordering; useful for
                 exploring null cases
+
+            seed -- [None] random seed to use (see np.random.default_rng)
 
             scale -- apply a single rescaling weight
 
@@ -1809,7 +1817,8 @@ class Data(object):
             # minimum_fractional exposure, use with care
             cexp = np.cumsum(exp*scales)
             cexp *= 1./cexp[-1]
-            indices = np.searchsorted(cexp,np.random.rand(len(times)))
+            rng = np.random.default_rng(seed)
+            indices = np.searchsorted(cexp,rng.random(len(times)))
             a = np.argsort(indices)
             times = times[a]
             weights = weights[a]
@@ -1859,15 +1868,13 @@ class Data(object):
             stops = bary_edges[1:][exposure_mask]
 
         if time_series_only:
-            weights_vec = np.zeros(len(starts),dtype=float)
-            weights2_vec = np.zeros(len(starts),dtype=float)
-            idx = 0
-            for i in range(len(starts)):
-                if nweights[i] > 0:
-                    w = weights[idx:idx+nweights[i]]
-                    idx += nweights[i]
-                    weights_vec[i] = np.sum(w)
-                    weights2_vec[i] = np.sum(w**2)
+            # Get the indices of the cells in the weights
+            idx = np.append(0,np.cumsum(nweights))
+            # Use high precision on the cumulative sum
+            W1 = np.append(0,np.cumsum(weights.astype(np.float128)))
+            W2 = np.append(0,np.cumsum(weights.astype(np.float128)**2))
+            weights_vec = (W1[idx[1:]]-W1[idx[:-1]]).astype(float)
+            weights2_vec = (W2[idx[1:]]-W2[idx[:-1]]).astype(float)
             #minimum_exposure = minimum_exposure*(tcell/30)
             if use_barycenter:
                 return CellTimeSeries(
@@ -1897,7 +1904,7 @@ class Data(object):
         return list(cells)
 
     def get_cells_from_time_intervals(self,tstarts,tstops,
-            randomize=False):
+            randomize=False,seed=None):
         """ Given a specific set of start and stop times, makes Cells.
 
         Ideally this would be merged with the more general method.
@@ -1908,6 +1915,8 @@ class Data(object):
         start_idx = np.searchsorted(self.ti,tstarts)
         stop_idx = np.searchsorted(self.ti,tstops)
         if randomize:
+
+            rng = np.random.default_rng(seed)
 
             # first, just get all of the relevant weights and times
             nphot = np.sum(stop_idx)-np.sum(start_idx)
@@ -1926,7 +1935,7 @@ class Data(object):
             # according to it
             cexp = np.cumsum(exp)
             cexp /= cexp[-1]
-            new_indices = np.searchsorted(cexp,np.random.rand(nphot))
+            new_indices = np.searchsorted(cexp,rng.random(nphot))
             nweights = np.bincount(new_indices,minlength=ncell)
 
             # randomly permute the weights, and then draw random times
@@ -1935,7 +1944,7 @@ class Data(object):
             new_indices = new_indices[a]
             we = we[a]
             dts = (tstops-tstarts)[new_indices]
-            ti = tstarts[new_indices] + np.random.rand(nphot)*dts
+            ti = tstarts[new_indices] + rng.random(nphot)*dts
 
             cells = deque()
             idx = 0
@@ -1959,14 +1968,14 @@ class Data(object):
         return list(cells)
 
     def get_contiguous_exposure_cells(self,tstart=None,tstop=None,
-            randomize=False):
+            randomize=False,seed=None):
         """ Return Cells for all contiguous exposure cells between
         tstart and tstop.
         """
         starts,stops = self.get_contiguous_exposures(
                 tstart=tstart,tstop=tstop)
         return self.get_cells_from_time_intervals(starts,stops,
-                randomize=randomize)
+                randomize=randomize,seed=seed)
 
 
 class PhaseData(Data):
@@ -2006,7 +2015,7 @@ class PhaseData(Data):
         self.B = len(self.we)-self.S
 
 
-    def get_cells(self,ncell=100,get_converse=False,randomize=False):
+    def get_cells(self,ncell=100,get_converse=False,randomize=False,seed=None):
             
         edges = np.linspace(0,1,ncell+1)
         starts,stops = edges[:-1],edges[1:] 
@@ -2016,7 +2025,8 @@ class PhaseData(Data):
         if get_converse:
             weights = 1-weights
         if randomize:
-            times = np.random.rand(len(times))
+            rng = np.random.default_rng(seed)
+            times = rng.random(len(times))
             a = np.argsort(times)
             times = times[a]
             weights = weights[a]
@@ -2358,6 +2368,9 @@ def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
     alpha_sin = (WbWb_sin*WmS_sin-WWb_sin*WbmB_sin)*denom_sin
     beta_cos = (WW_cos*WbmB_cos-WWb_cos*WmS_cos)*denom_cos
     beta_sin = (WW_sin*WbmB_sin-WWb_sin*WmS_sin)*denom_sin
+    # TMP
+    dbug.update(locals())
+    # end TMP
 
     if get_amps:
         return freqs[:(l//4+1)],alpha_cos0,alpha_sin0,WW_cos,WW_sin
