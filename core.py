@@ -15,8 +15,6 @@ import py_exposure_p8
 t0_8year = 239557007.6
 t1_8year = 491999980.6
 
-dbug = dict()
-
 def met2mjd(times,mjdref=51910+7.428703703703703e-4):
     times = np.asarray(times,dtype=np.float128)
     return times*(1./86400)+mjdref
@@ -1656,12 +1654,15 @@ class Data(object):
             snap_edges_to_exposure=False,trim_zero_exposure=True,
             time_series_only=False,use_barycenter=True,
             randomize=False,seed=None,scale=None,
-            scale_series=None,exposure_scaler=None,
+            scale_series=None,source_scaler=None,
             minimum_exposure=3e4,minimum_fractional_exposure=0,
             quiet=False):
         """ Return the starts, stops, exposures, and photon data between
             tstart and tstop.  If tcell is specified, bin data into cells
             of length tcell (s).  Otherwise, return photon-based cells.
+
+            Parameters
+            ---------
 
             snap_edges_to_exposure -- move the edges of the returned cells
                 to align with the resolution of the underlying FT2 file; 
@@ -1697,7 +1698,7 @@ class Data(object):
                 giving the boundaries of the time interval of scale
                 validity; these should be contiguous.  Times in MET.
 
-                This is useful for analyses like Cygnus X-3, there there
+                This is useful for analyses like Cygnus X-3, where there
                 is overall "slow" source variation and a fast (orbital)
                 periodicity.  Scaling so that the weights account for the
                 slow variation (enhancing the times when it is on) improves
@@ -1714,17 +1715,17 @@ class Data(object):
                 care if using short (e.g. <1d) tcell, as the intrinsic
                 exposure variation becomes large.
 
-            exposure_scaler -- a function which will take MET and give
+            source_scaler -- a function which will take MET and give
                 a scaling factor.  This is applied to each exposure
                 interval, and the weights are re-distributed according to
-                the re-scaled exposure.  This allows for the injection of
-                a signal into the data.  (NB -- this is also removes any
-                original signal because the weights are fully shuffled
-                according to the new exposure.  A uniform rescale is
-                equivalent to randomize=True.)
-
-            TODO -- implement a "use FT2 cells" feature, and a "use orbits"
-            feature
+                the re-scaled exposure.  NB that for each event, a random
+                number is chosen such that the event is assigned to the
+                background, in which case it follows the exposure, or to
+                the source, in which case it follows the scaled exposure.
+                This allows for the injection of a signal into the data.  
+                It also removes any original signal because the weights are
+                fully shuffled according to the exposure.  A uniform 
+                rescale is equivalent to randomize=True.
 
         """
         ft1_is_bary = self.timeref == 'SOLARSYSTEM'
@@ -1773,7 +1774,7 @@ class Data(object):
             topo_edges = self._bary2topo(edges)
             bary_edges = edges
         else:
-            topo_edges = edges
+            topo_edges = bary_edges = edges
 
         # always use topocentric times to manage the exposure calculation
         self._topo_edges = topo_edges.copy()
@@ -1793,6 +1794,8 @@ class Data(object):
         weights = self.we[istart:istop]
 
         if minimum_fractional_exposure > 0:
+            if randomize or (source_scaler is not None):
+                print("Warning!  Using minimum_fractional_exposure>0 with randomize or source_scaler is not tested, probably not supported.")
             frac_exp = exp/exp[exp>0].mean()
             exp[frac_exp < minimum_fractional_exposure] = 0
 
@@ -1809,25 +1812,55 @@ class Data(object):
         else:
             exposure_mask = slice(0,len(starts))
 
-        if randomize or (exposure_scaler is not None):
-            scales = 1
-            if exposure_scaler is not None:
-                scales = exposure_scaler(starts,stops)
-            # NOT SURE how consistent this is with e.g.
-            # minimum_fractional exposure, use with care
-            cexp = np.cumsum(exp*scales)
+        if randomize:
+            # Redistribute the weights according to exposure
+            cexp = np.cumsum(exp)
             cexp *= 1./cexp[-1]
             rng = np.random.default_rng(seed)
             indices = np.searchsorted(cexp,rng.random(len(times)))
             a = np.argsort(indices)
+            # These lines re-order the times/weights, and set the event_idx
+            # field (which maps events to cells) to map the times/weights 
+            # to the new, randomly chosen cells.
             times = times[a]
             weights = weights[a]
             event_idx = indices[a]
+
+        elif source_scaler is not None:
+            # Redistribute the weights:
+            # (1) background events follow the exposure
+            # (2) source events follow the scaled exposure
+            # NB -- exposure in topocentric time, but flux scaling in bary
+            bstarts,bstops = bary_edges[:-1],bary_edges[1:]
+            #bstarts,bstops = starts,stops
+            scales = source_scaler(bstarts,bstops)
+
+            rng = np.random.default_rng(seed)
+            mask = rng.random(len(times)) >= weights
+            rv = rng.random(len(times))
+            
+            # Form cumulative distributions for background and source
+            _bexp = np.cumsum(exp)
+            _bexp *= 1./_bexp[-1]
+            _sexp = np.cumsum(exp*scales)
+            _sexp *= 1./_sexp[-1]
+
+            # Insert the weights randomly following the distributions
+            indices = np.empty(len(times),dtype=int)
+            indices[mask] = np.searchsorted(_bexp,rv[mask])
+            mask = ~mask
+            indices[mask] = np.searchsorted(_sexp,rv[mask])
+
+            a = np.argsort(indices)
+            times = times[a]
+            weights = weights[a]
+            event_idx = indices[a]
+            assert(np.all(exp[event_idx]>0))
+
         else:
             event_idx = np.searchsorted(stops,times)
 
         nweights = np.bincount(event_idx,minlength=len(starts))
-        self._exp = exp.copy()
 
         # rescale the weights
         if scale_series is not None:
@@ -1867,6 +1900,8 @@ class Data(object):
             starts = bary_edges[:-1][exposure_mask]
             stops = bary_edges[1:][exposure_mask]
 
+        # AHAH -- this is broken when the weights have been re-shuffled
+        # Needs to obey event_idx, so probably back to the slow mode
         if time_series_only:
             # Get the indices of the cells in the weights
             idx = np.append(0,np.cumsum(nweights))
@@ -2368,9 +2403,6 @@ def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
     alpha_sin = (WbWb_sin*WmS_sin-WWb_sin*WbmB_sin)*denom_sin
     beta_cos = (WW_cos*WbmB_cos-WWb_cos*WmS_cos)*denom_cos
     beta_sin = (WW_sin*WbmB_sin-WWb_sin*WmS_sin)*denom_sin
-    # TMP
-    dbug.update(locals())
-    # end TMP
 
     if get_amps:
         return freqs[:(l//4+1)],alpha_cos0,alpha_sin0,WW_cos,WW_sin
