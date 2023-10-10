@@ -429,9 +429,16 @@ class EfficiencyCorrection(object):
 
     def _set_parms(self,irf_file):
         f = fits.open(irf_file)
-        try:
-            self.v1,self.v2,self.v3,self.v4 = f['EFFICIENCY_PARAMS'].data.field('EFFICIENCY_PARS')
-        except KeyError:
+        hdu_names = [x.name.lower() for x in f]
+        hdu = 'efficiency_params'
+        key = 'efficiency_pars'
+        if f'{hdu}_front' in hdu_names:
+            # P8
+            self.v1,self.v2 = f[f'{hdu}_front'].data[key]
+            self.v3,self.v4 = f[f'{hdu}_back'].data[key]
+        elif hdu in hdu_names:
+            self.v1,self.v2,self.v3,self.v4 = f[hdu].data[key]
+        else:
             print('Efficiency parameters not found in %s.'%irf_file)
             print('Assuming P6_v3_diff parameters.')
             self.v1 = [-1.381,  5.632, -0.830, 2.737, -0.127, 4.640]  # p0, front

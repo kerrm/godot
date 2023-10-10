@@ -84,7 +84,7 @@ class CellTimeSeries(object):
     """
 
     def __init__(self,starts,stops,exp,sexp,bexp,
-            counts,weights,weights2,
+            counts,weights,weights2,deadtime,
             alt_starts=None,alt_stops=None,timesys='barycenter',
             minimum_exposure=3e4):
         self.starts = starts
@@ -95,6 +95,7 @@ class CellTimeSeries(object):
         self.counts = counts
         self.weights = weights
         self.weights2 = weights2
+        self.deadtime = deadtime
         self.alt_starts = alt_starts
         self.alt_stops = alt_stops
         self.timesys = timesys
@@ -1246,7 +1247,7 @@ class Data(object):
             base_spectrum=None,use_weights_for_exposure=False,
             weight_cut=1,max_radius=None,bary_ft1files=None,
             tstart=None,tstop=None,apply_8year_scale=False,
-            verbosity=1):
+            verbosity=1,correct_efficiency=True,theta_cut=0.4):
         """ The FT1 files, FT2 files;
             ra, dec of source (deg)
             weight_cut -- fraction of source photons to retain
@@ -1280,12 +1281,17 @@ class Data(object):
                 tstart=tstart,tstop=tstop,verbose=verbosity)
         mask,pcosines,acosines = lt.get_cosines(
                 np.radians(ra),np.radians(dec),
-                theta_cut=0.4,zenith_cut=np.cos(np.radians(zenith_cut)),
+                theta_cut=theta_cut,
+                zenith_cut=np.cos(np.radians(zenith_cut)),
                 get_phi=use_phi)
         phi = np.arccos(acosines) if use_phi else None
         if use_weights_for_exposure:
             base_spectrum = None
-        aeff,self.total_exposure_edom,self.total_exposure = self._get_weighted_aeff(pcosines,phi,base_spectrum)
+        if correct_efficiency:
+            ltfrac = lt.LIVETIME[mask]/(lt.STOP[mask]-lt.START[mask])
+        else:
+            ltfrac = None
+        aeff,self.total_exposure_edom,self.total_exposure = self._get_weighted_aeff(pcosines,phi,base_spectrum=base_spectrum,ltfrac=ltfrac)
         exposure = np.zeros(len(mask))
         exposure[mask] = aeff*lt.LIVETIME[mask]
         # just get rid of any odd bins -- this cut corresponds to roughly
@@ -1297,8 +1303,12 @@ class Data(object):
 
         self.TSTART = lt.START[full_mask]
         self.TSTOP = lt.STOP[full_mask]
+        self.LIVETIME = lt.LIVETIME[full_mask]
         self.exposure = exposure[full_mask]
         self.cexposure = np.cumsum(self.exposure)
+        # TMP?
+        self._pcosines = pcosines[full_mask[mask]] # eww
+        self._acosines = acosines[full_mask[mask]]
 
         data,self.timeref,photon_idx = self._load_photons(
                 ft1files,weight_col,self.TSTART[0],self.TSTOP[-1],
@@ -1375,9 +1385,15 @@ class Data(object):
         self.__dict__.update(state)
 
     def _get_weighted_aeff(self,pcosines,phi,base_spectrum=None,
-            use_event_weights=False,livetime=None):
-        ea = py_exposure_p8.EffectiveArea(
-                irf='P8R2_SOURCE_V6',use_phidep=phi is not None)
+            use_event_weights=False,livetime=None,ltfrac=None):
+        ea = py_exposure_p8.EffectiveArea(use_phidep=phi is not None)
+        if ltfrac is not None:
+            # evaluate efficiency correction
+            ec = py_exposure_p8.EfficiencyCorrection()
+            feffic = ec.get_efficiency(ltfrac,conversion_type=0)
+            beffic = ec.get_efficiency(ltfrac,conversion_type=1)
+        else:
+            feffic = beffic = None
         if base_spectrum is not None:
             edom = np.logspace(2,5,25)
             wts = base_spectrum(edom)
@@ -1386,7 +1402,10 @@ class Data(object):
             rvals = np.empty([len(edom),len(pcosines)])
             for i,(en,wt) in enumerate(zip(edom,wts)):
                 faeff,baeff = ea([en],pcosines,phi=phi)
-                rvals[i] = (faeff+baeff)*wt
+                if ltfrac is not None:
+                    rvals[i] = (faeff*feffic+baeff*beffic)*wt
+                else:
+                    rvals[i] = (faeff+baeff)*wt
                 total_exposure[i] = rvals[i].sum()/wt
             aeff = simps(rvals,edom,axis=0)/simps(wts,edom)
         elif use_event_weights:
@@ -1399,7 +1418,7 @@ class Data(object):
             try:
                 en = self.other_data[self.other_data_cols.index('energy')]
             except ValueError:
-                return self._get_weighted_aeff(pcosines,phi,base_spectrum=base_spectrum,use_event_weights=False)
+                return self._get_weighted_aeff(pcosines,phi,base_spectrum=base_spectrum,use_event_weights=False,ltfrac=ltfrac)
             edom = np.logspace(2,5,25)
             wcts = np.histogram(en,weights=self.we,bins=edom)[0]
             ledom = np.log10(edom)
@@ -1499,7 +1518,7 @@ class Data(object):
         self._barycon = interp1d(bary_knots,topo_knots,bounds_error=True)
         return self._barycon(bary_times)
 
-    def get_exposure(self,times):
+    def get_exposure(self,times,deadtime_too=False):
         """ Return the cumulative exposure at the given times.
         """
         TSTART,TSTOP = self.TSTART,self.TSTOP
@@ -1509,7 +1528,16 @@ class Data(object):
         # negative fraction; ditto for something that starts before
         frac = (times -TSTART[idx])/(TSTOP[idx]-TSTART[idx])
         np.clip(frac,0,1,out=frac)
-        return self.cexposure[idx]-self.exposure[idx]*(1-frac)
+        cexp = self.cexposure[idx]-self.exposure[idx]*(1-frac)
+        if not deadtime_too:
+            return cexp
+        deadtime = (TSTOP-TSTART)-self.LIVETIME
+        cdead = np.cumsum(deadtime)[idx]-deadtime[idx]*(1-frac)
+        return cexp,cdead
+
+    def get_deadtime(self,times):
+        """ Return the cumulative deadtime at the provided times."""
+        return self.get_exposure(time,deadtime_too=True)[1]
 
     def get_contiguous_exposures(self,tstart=None,tstop=None,
             max_interval=10):
@@ -1778,8 +1806,9 @@ class Data(object):
 
         # always use topocentric times to manage the exposure calculation
         self._topo_edges = topo_edges.copy()
-        cexp = self.get_exposure(topo_edges)
+        cexp,dead = self.get_exposure(topo_edges,deadtime_too=True)
         exp = (cexp[1:] - cexp[:-1])
+        dead = (dead[1:]-dead[:-1])
         if snap_edges_to_exposure:
             raise NotImplementedError
         else:
@@ -1809,15 +1838,14 @@ class Data(object):
             starts = starts[exposure_mask]
             stops = stops[exposure_mask]
             exp = exp[exposure_mask]
+            dead = dead[exposure_mask]
         else:
             exposure_mask = slice(0,len(starts))
 
         if randomize:
             # Redistribute the weights according to exposure
-            cexp = np.cumsum(exp)
-            cexp *= 1./cexp[-1]
             rng = np.random.default_rng(seed)
-            indices = np.searchsorted(cexp,rng.random(len(times)))
+            indices = np.searchsorted(cexp/cexp[-1],rng.random(len(times)))
             a = np.argsort(indices)
             # These lines re-order the times/weights, and set the event_idx
             # field (which maps events to cells) to map the times/weights 
@@ -1914,14 +1942,14 @@ class Data(object):
             if use_barycenter:
                 return CellTimeSeries(
                     starts,stops,exp,sexp,bexp,
-                    nweights,weights_vec,weights2_vec,
+                    nweights,weights_vec,weights2_vec,dead,
                     alt_starts=topo_edges[:-1][exposure_mask],
                     alt_stops=topo_edges[1:][exposure_mask],
                     timesys='barycenter',minimum_exposure=0)
             else:
                 return CellTimeSeries(
                     starts,stops,exp,sexp,bexp,
-                    nweights,weights_vec,weights2_vec,
+                    nweights,weights_vec,weights2_vec,dead,
                     timesys='topocentric',minimum_exposure=0)
         # NB this hasn't been updated to properly incorporate the flexible
         # (time-dependent) scale!  So raise an error if that's used.
