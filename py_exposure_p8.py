@@ -18,10 +18,15 @@ from os.path import join
 # third-party packages
 import numpy as np
 from astropy.io import fits
-from scipy.interpolate import interp1d,interp2d
+from scipy.interpolate import interp1d
 
 # fermitools
 import pycaldb
+import pypsf
+# TMP
+from importlib import reload
+reload(pypsf)
+# END TMP
 import keyword_options
 from gti import Gti
 
@@ -29,6 +34,229 @@ from gti import Gti
 DEG2RAD = np.pi/180.
 EQUATORIAL = 1
 GALACTIC = 0
+DEFAULT_IRF ='P8R3_SOURCE_V3'
+
+def get_contiguous_exposures(TSTART,TSTOP,tstart=None,tstop=None,
+        max_interval=10,get_indices=False):
+    """ Given a set of FT2-like entries with bounds TSTART/TSTOP, return the
+    edges of the intervals for which the exposure is uninterrupted.
+
+    This will typically be an orbit, or portions of an orbit if there is an
+    SAA passage.
+
+    Parameters
+    ----------
+    TSTART : starts of exposure intervals (MET)
+    TSTOP : ends of exposure intervals (MET)
+    tstart : optional start time for intervals to return (MET)
+    tstop : optional end time for intervals to return (MET)
+    max_interval -- maximum acceptable break in exposure for a
+        contiguous interval [10s]
+    get_indices : if True, return the index of the first entry in each new
+        segment, viz. TSTART[idx]-TSTOP[idx-1] > max_interval
+    """
+
+    t0s = TSTART
+    t1s = TSTOP
+    if tstart is not None:
+        idx = np.searchsorted(t1s,tstart)
+        t0s = t0s[idx:].copy()
+        t1s = t1s[idx:].copy()
+        if tstart < t0s[0]:
+            tstart = t0s[0]
+        else:
+            t0s[0] = tstart
+    if tstop is not None:
+        idx = np.searchsorted(t1s,tstop)
+        t0s = t0s[:idx].copy()
+        t1s = t1s[:idx].copy()
+        if tstop < t0s[-1]:
+            t0s = t0s[:-1]
+            t1s = t1s[:-1]
+            tstop = t1s[-1]
+        else:
+            t1s[-1] = tstop
+
+    break_mask = (t0s[1:]-t1s[:-1])>max_interval
+    break_starts = t1s[:-1][break_mask]
+    break_stops = t0s[1:][break_mask]
+    # now assemble the complement
+    good_starts = np.empty(len(break_starts)+1)
+    good_stops = np.empty_like(good_starts)
+    good_starts[0] = t0s[0]
+    good_starts[1:] = break_stops
+    good_stops[-1] = t1s[-1]
+    good_stops[:-1] = break_starts
+    if get_indices:
+        return good_starts,good_stops,np.flatnonzero(break_mask)+1
+    return good_starts,good_stops
+
+def adjust_cosines(TSTART,TSTOP,pcosines,acosines=None,zcosines=None,
+        oversample=None):
+
+    assert(len(pcosines)==len(TSTART))
+    _,_,idx = get_contiguous_exposures(TSTART,TSTOP,get_indices=True)
+    edges = np.append(0,idx)
+    if idx[-1] < len(pcosines):
+        edges = np.append(edges,len(pcosines))
+
+    N = len(pcosines)
+    if oversample:
+        N *= 2
+    prvals = np.empty(N)
+    arvals = np.empty(N) if (acosines is not None) else None
+    zrvals = np.empty(N) if (zcosines is not None) else None
+    # TMP
+    prvals[:] = np.nan
+
+    def interpolate(dx,y,oversample=False,clip_min=-1):
+
+        if len(y) == 1:
+            if oversample:
+                return np.asarray([y[0],y[0]])
+            return y
+
+        # evaluate the slope and extrapolate the final point
+        m = np.empty(len(y))
+        m[:-1] = y[1:]-y[:-1]
+        # in case the last bin is shorter than the preceding one, correct
+        # the slop for its duration
+        m[-1] = m[-2]*dx[-1]/dx[-2]
+
+        if oversample:
+            rvals = np.empty(len(x)*2)
+            rvals[0::2] = y[::2] + m*0.25
+            rvals[1::2] = y[::2] + m*0.75
+        else:
+            rvals = y + m*0.5
+
+        return np.clip(rvals,clip_min,1,out=rvals)
+
+    for i0,i1 in zip(edges[:-1],edges[1:]):
+        dx = TSTOP[i0:i1] - TSTART[i0:i1]
+        if oversample:
+            mi0,mi1 = 2*i0,2*i1
+        else:
+            mi0,mi1 = i0,i1
+        prvals[mi0:mi1] = interpolate(
+                dx,pcosines[i0:i1],oversample=oversample)
+        if arvals is not None:
+            arvals[mi0:mi1] = interpolate(
+                    dx,acosines[i0:i1],oversample=oversample,clip_min=0)
+        if zrvals is not None:
+            zrvals[mi0:mi1] = interpolate(
+                    dx,zcosines[i0:i1],oversample=oversample,clip_min=0)
+    # TMP
+    assert(not np.any(np.isnan(prvals)))
+    return prvals,arvals,zrvals
+
+# This is an adhoc attempt to correct exposure to bin center AFTER collapse
+# to a scalar.  Fast but not very useful...?
+def adjust_exposure(TSTART,TSTOP,exposure):
+
+    assert(len(exposure)==len(TSTART))
+    _,_,idx = get_contiguous_exposures(TSTART,TSTOP,get_indices=True)
+    edges = np.append(0,idx)
+    if idx[-1] < len(exposure):
+        edges = np.append(edges,len(exposure))
+
+    rvals = np.empty_like(exposure)
+    # TMP
+    rvals[:] = np.nan
+
+    def interpolate(x,y,xmid):
+
+        if len(x) == 1:
+            return y
+        elif len(x) == 2:
+            kind = 'linear'
+        else:
+            kind = 'quadratic'
+
+        ip = interp1d(x,y,kind=kind,bounds_error=False,
+                fill_value='extrapolate')
+        return np.maximum(0,ip(xmid))
+
+    for i0,i1 in zip(edges[:-1],edges[1:]):
+        x0 = TSTART[i0:i1]
+        xmid = 0.5*(x0+TSTOP[i0:i1])
+        rvals[i0:i1] = interpolate(x0,exposure[i0:i1],xmid)
+    # TMP
+    assert(not np.any(np.isnan(rvals)))
+    return rvals
+
+class InterpTable(object):
+    """ Implement 2d bilinear or nearest neighbor interpolation.
+
+    Bilinear will automatically extrapolate past bin centers.
+
+    This is largely designed for interpolation in log10(E) and cos(theta).
+    """
+
+    def __init__(self,x,y,z):
+
+        x0 = x[0]-(x[1]-x[0])
+        x1 = x[-1]+(x[-1]-x[-2])
+        x = np.concatenate(([x0],x,[x1]))
+        y0 = y[0]-(y[1]-y[0])
+        y1 = y[-1]+(y[-1]-y[-2])
+        y = np.concatenate(([y0],y,[y1]))
+        z = self._augment_data(z)
+
+        self._x = x
+        self._y = y
+        self._z = z
+        self._xmid = 0.5*(self._x[1:]+self._x[:-1])
+        self._ymid = 0.5*(self._y[1:]+self._y[:-1])
+        self._dx = x[1]-x[0]
+        self._dy = y[1]-y[0]
+
+    def _augment_data(self,data):
+        """ Build a copy of data extrapolated by one sample."""
+
+        d = np.empty([data.shape[0]+2,data.shape[1]+2])
+
+        # copy original data into interior
+        d[1:-1,1:-1] = data
+
+        # add bottom row (not corners)
+        d[0,1:-1] = data[0] - (data[1]-data[0])
+
+        # add top row (not corners)
+        d[-1,1:-1] = data[-1] + (data[-1]-data[-2])
+
+        # add left side (not corners)
+        d[1:-1,0] = data[:,0] - (data[:,1]-data[:,0])
+
+        # add right side (not corners)
+        d[1:-1,-1] = data[:,-1] + (data[:,-1]-data[:,-2])
+
+        # corners
+        d[0,0] = d[1,0] + d[0,1] - data[0,0]
+        d[0,-1] = d[1,-1] + d[0,-2] - data[0,-1]
+        d[-1,0] = d[-2,0] + d[-1,1] - data[-1,0]
+        d[-1,-1] = d[-2,-1] + d[-1,-2] - data[-1,-1]
+
+        return d
+
+    def __call__(self,x,y,bilinear=True):
+
+        if not bilinear:
+            i = np.searchsorted(self._xmid,x)
+            j = np.searchsorted(self._ymid,y)
+            return self._z[i,j]
+
+        i = np.searchsorted(self._x,x)-1
+        j = np.searchsorted(self._y,y)-1
+
+        x2,x1 = self._x[i+1],self._x[i]
+        y2,y1 = self._y[j+1],self._y[j]
+        f00 = self._z[i,j]
+        f11 = self._z[i+1,j+1]
+        f10 = self._z[i+1,j]
+        f01 = self._z[i,j+1]
+        norm = 1./((x2-x1)*(y2-y1))
+        return ( (x2-x)*(f00*(y2-y)+f01*(y-y1)) + (x-x1)*(f10*(y2-y)+f11*(y-y1)) )*norm
 
 class Binning(object):
     """ Specify the binning for a livetime calculation."""
@@ -61,12 +289,13 @@ class Livetime(object):
        specified in a collection of FT1 files and the livetime entries from
        an FT2 file.
 
-       The default implementation is fully-unbinned, i.e., when the user
-       requests the livetime, the exact values for the S/C z-axis and
-       zenith positions are used to calculate the incidence/zenith angles.
+       The default implementation uses the native resolution of the FT2
+       file, i.e., when the user requests the livetime, the values for the
+       S/C z-axis and zenith positions are used directly to calculate the
+       incidence/zenith angles.
 
        This executes with comparable speed (factor of ~2 slower) to the
-       Science Tools application gtltcube."""
+       Science Tools application gtltcube (which bins position)."""
 
     defaults = (
         ('verbose',1,'verbosity level'),
@@ -302,36 +531,85 @@ class Livetime(object):
         for field in self.fields:
             self.__dict__[field] = self.__dict__[field][mask]
 
-    def get_cosines(self,ra,dec,theta_cut,zenith_cut,get_phi=False):
+    def get_cosines(self,ra,dec,theta_cut,zenith_cut,get_phi=False,
+            apply_correction=False,oversample=False):
         """ Return the cosine of the arclength between the specified 
             direction and the S/C z-axis and [optionally] the azimuthal
             orientation as a cosine.
 
-        ra -- right ascention (radians)
-        dec -- declination (radians)
-        theta_cut -- cosine(theta_max)
-        zenith_cut -- cosine(zenith_max)
+        Parameters
+        ----------
+        ra : right ascention (radians)
+        dec : declination (radians)
+        theta_cut : cosine(theta_max)
+        zenith_cut : cosine(zenith_max)
+        get_phi : return the polar cosines too
+        apply_correction : if True, correct the S/C orientation to the
+            center of the FT2 interval.  The data are tabulated at START,
+            but the livetime is accumulated over START to STOP.  The
+            correction is an interpolation between neighboring entries.
+            This can be a bit slow.
+        oversample: replace every FT2 bin by one half its size with the
+            interpolated S/C attitude
 
         Returns:
         mask -- True if the FT2 interval satisfies the specified cuts
         pcosines -- cosines of polar angles
         acosines -- cosines of azimuthal angles [optional]
         """    
+        # all of these calculations basically determine the dot product
+        # between the source position and the vector of interest, viz. the
+        # S/C Z- and X-axes, and the zenith direction.
         ra_s,ra_z = self.RA_SCZ,self.RA_ZENITH
         cdec,sdec = np.cos(dec),np.sin(dec)
+
         # cosine(polar angle) of source in S/C system
         pcosines  = self.COS_DEC_SCZ*cdec*np.cos(ra-self.RA_SCZ) + self.SIN_DEC_SCZ*sdec
-        mask = pcosines >= theta_cut
+        #mask = pcosines >= theta_cut
+
         if zenith_cut > -1:
+            # cosine(polar angle) between source and zenith
             zcosines = self.COS_DEC_ZENITH*cdec*np.cos(ra-self.RA_ZENITH) + self.SIN_DEC_ZENITH*sdec
-            mask = mask & (zcosines>=zenith_cut)
-        pcosines = pcosines[mask]
+            #mask = mask & (zcosines>=zenith_cut)
+
         if get_phi:
-            ra_s = self.RA_SCX[mask]
-            acosines = self.COS_DEC_SCX[mask]*cdec*np.cos(ra-self.RA_SCX[mask]) + self.SIN_DEC_SCX[mask]*sdec
-            np.clip(np.abs(acosines/(1-pcosines**2)**0.5),0,1,out=acosines) # fold to 0-pi/2
-        else: acosines = None
-        return mask,pcosines,acosines
+            ra_s = self.RA_SCX
+            acosines = self.COS_DEC_SCX*cdec*np.cos(ra-self.RA_SCX) + self.SIN_DEC_SCX*sdec
+            # the (1-pcosine^2)**0.5 normalizes the vector to the X/Y plane,
+            # so that the remaining portion is just the source vector
+            # projected onto the x axis; and the abs/clip folds to 0 to pi/2
+            # to enforce the four-fold symmetry
+            np.clip(np.abs(acosines/(1-pcosines**2)**0.5),0,1,out=acosines)
+        else:
+            acosines = None
+        if oversample:
+            T0 = self.START#[mask]
+            T1 = self.STOP#[mask]
+            pcosines,acosines,zcosines = adjust_cosines(
+                    T0,T1,pcosines,acosines,zcosines,oversample=True)
+            dT = T1-T0
+            new_T0 = np.empty(len(T0)*2)
+            new_T0[0::2] = T0
+            new_T0[1::2] = T0 + 0.5*dT
+            new_T1 = np.empty(len(T0)*2)
+            new_T1[0::2] = new_T0[1::2]
+            new_T1[1::2] = T1
+            new_LT = np.empty(len(T0)*2)
+            new_LT[0::2] = 0.5*self.LIVETIME#[mask]
+            new_LT[1::2] = 0.5*self.LIVETIME#[mask]
+            mask = (pcosines >= theta_cut) & (zcosines >= zenith_cut)
+            assert(len(pcosines)==len(new_T0))
+            return mask,pcosines[mask],acosines[mask],new_T0[mask],new_T1[mask],new_LT[mask]
+            # OK, tomorrow: doing the mask at the beginning doesn't make
+            # much of a difference but speeds things up a lot, so let's
+            # revert to that (?)
+        if apply_correction:
+            T0 = self.START#[mask]
+            T1 = self.STOP#[mask]
+            pcosines,acosines,zcosines = adjust_cosines(
+                    T0,T1,pcosines,acosines,zcosines,oversample=False)
+        mask = (pcosines >= theta_cut) & (zcosines >= zenith_cut)
+        return mask,pcosines[mask],acosines[mask],self.START[mask],self.STOP[mask],self.LIVETIME[mask]
 
     def _do_bin(self,binning,mask,pcosines,acosines,time_range=None):
         weights = self.LIVETIME[mask]
@@ -417,7 +695,23 @@ class BinnedLivetime(Livetime):
 class EfficiencyCorrection(object):
     """ Apply a trigger-rate dependent correction to the livetime."""
     
-    def p(self,logE,v):
+    def __init__(self,irf=DEFAULT_IRF):
+        self.irf = irf
+        cdbm = pycaldb.CALDBManager(self.irf)
+        hdus = [fits.open(f) for f in cdbm.get_aeff()]
+        self._p0s = dict()
+        self._p1s = dict()
+        for hdu in hdus:
+            for table in hdu:
+                dat = table.data
+
+                if table.name.startswith('EFFICIENCY_PARAMS'):
+                    event_type = table.name.split('_')[-1]
+                    self._p0s[event_type] = dat['efficiency_pars'][0]
+                    self._p1s[event_type] = dat['efficiency_pars'][1]
+            hdu.close()
+
+    def _p(self,logE,v):
         a0,b0,a1,logEb1,a2,logEb2 = v
         b1 = (a0 - a1)*logEb1 + b0
         b2 = (a1 - a2)*logEb2 + b1
@@ -427,192 +721,108 @@ class EfficiencyCorrection(object):
             return a1*logE + b1
         return a2*logE + b2
 
-    def _set_parms(self,irf_file):
-        f = fits.open(irf_file)
-        hdu_names = [x.name.lower() for x in f]
-        hdu = 'efficiency_params'
-        key = 'efficiency_pars'
-        if f'{hdu}_front' in hdu_names:
-            # P8
-            self.v1,self.v2 = f[f'{hdu}_front'].data[key]
-            self.v3,self.v4 = f[f'{hdu}_back'].data[key]
-        elif hdu in hdu_names:
-            self.v1,self.v2,self.v3,self.v4 = f[hdu].data[key]
-        else:
-            print('Efficiency parameters not found in %s.'%irf_file)
-            print('Assuming P6_v3_diff parameters.')
-            self.v1 = [-1.381,  5.632, -0.830, 2.737, -0.127, 4.640]  # p0, front
-            self.v2 = [ 1.268, -4.141,  0.752, 2.740,  0.124, 4.625]  # p1, front
-            self.v3 = [-1.527,  6.112, -0.844, 2.877, -0.133, 4.593]  # p0, back
-            self.v4 = [ 1.413, -4.628,  0.773, 2.864,  0.126, 4.592]  # p1, back
+    def __call__(self,e,ltfrac,event_type):
+        """
+        Return the trigger efficiency as estimate from the livetime frac.
 
-    def __init__(self,irf='P8R3_SOURCE_V3',e=1000):
-        cdbm = pycaldb.CALDBManager(irf)
-        #ct0_file,ct1_file = get_irf_file(irf)
-        ct0_file,ct1_file = cdbm.get_aeff()
-        self._set_parms(ct0_file)
-        self.set_p(e)
-
-    def set_p(self,e):
+        Parameters
+        ----------
+        e : energy (MeV)
+        ltfrac : livetime fraction [0-1]
+        event_type : e.g. FRONT, BACK, PSF0, ..., PSF3
+        """
         loge = np.log10(e)
-        for key,vec in zip(['p0f','p1f','p0b','p1b'],[self.v1,self.v2,self.v3,self.v4]):
-            self.__dict__[key] = self.p(loge,vec)
-
-    def get_efficiency(self,livetime_fraction,conversion_type=0):
-        p0,p1 = (self.p0f,self.p1f) if conversion_type==0 else (self.p0b,self.p1b)
-        return p0*livetime_fraction + p1
-
-class InterpTable(object):
-    def __init__(self,xbins,ybins,augment=True):
-        """ Interpolation bins in energy and cos(theta)."""
-        self.xbins_0,self.ybins_0 = xbins,ybins
-        self.augment = augment
-        if augment:
-            x0 = xbins[0] - (xbins[1]-xbins[0])/2
-            x1 = xbins[-1] + (xbins[-1]-xbins[-2])/2
-            y0 = ybins[0] - (ybins[1]-ybins[0])/2
-            y1 = ybins[-1] + (ybins[-1]-ybins[-2])/2
-            self.xbins = np.concatenate(([x0],xbins,[x1]))
-            self.ybins = np.concatenate(([y0],ybins,[y1]))
-        else:
-            self.xbins = xbins; self.ybins = ybins
-        self.xbins_s = (self.xbins[:-1]+self.xbins[1:])/2
-        self.ybins_s = (self.ybins[:-1]+self.ybins[1:])/2
-
-    def augment_data(self,data):
-        """ Build a copy of data with outer edges replicated."""
-        d = np.empty([data.shape[0]+2,data.shape[1]+2])
-        d[1:-1,1:-1] = data
-        d[0,1:-1] = data[0,:]
-        d[1:-1,0] = data[:,0]
-        d[-1,1:-1] = data[-1,:]
-        d[1:-1,-1] = data[:,-1]
-        d[0,0] = data[0,0]
-        d[-1,-1] = data[-1,-1]
-        d[0,-1] = data[0,-1]
-        d[-1,0] = data[-1,0]
-        return d
-
-    def set_indices(self,x,y,bilinear=True):
-        if bilinear and (not self.augment):
-            print('Not equipped for bilinear, going to nearest neighbor.')
-            bilinear = False
-        self.bilinear = bilinear
-        if not bilinear:
-            i = np.searchsorted(self.xbins,x)-1
-            j = np.searchsorted(self.ybins,y)-1
-        else:
-            i = np.searchsorted(self.xbins_s,x)-1
-            j = np.searchsorted(self.ybins_s,y)-1
-        self.indices = i,j
-
-    def value(self,x,y,data):
-        i,j = self.indices
-        # NB transpose here
-        if not self.bilinear: return data[j,i]
-        x2,x1 = self.xbins_s[i+1],self.xbins_s[i]
-        y2,y1 = self.ybins_s[j+1],self.ybins_s[j]
-        f00 = data[j,i]
-        f11 = data[j+1,i+1]
-        f01 = data[j+1,i]
-        f10 = data[j,i+1]
-        norm = (x2-x1)*(y2-y1)
-        return ( (x2-x)*(f00*(y2-y)+f01*(y-y1)) + (x-x1)*(f10*(y2-y)+f11*(y-y1)) )/norm
-
-    def __call__(self,x,y,data,bilinear=True,reset_indices=True):
-        if reset_indices:
-            self.set_indices(x,y,bilinear=bilinear)
-        return self.value(x,y,data)
+        p0 = self._p(loge,self._p0s[event_type])
+        p1 = self._p(loge,self._p1s[event_type])
+        return p0*ltfrac + p1
 
 class EffectiveArea(object):
 
-    defaults = (
-        #('irf','P6_v3_diff','IRF to use'),
-        #('irf','P7SOURCE_V6','IRF to use'),
-        ('irf','P8R3_SOURCE_V3','IRF to use'),
-        ('CALDB',None,'path to override environment variable'),
-        ('use_phidep',False,'use azmithual dependence for effective area')
-        )
+    def __init__(self,irf=DEFAULT_IRF,CALDB=None,use_phidep=False):
+        """ Encapsulate reading the Fermi-LAT effective area.
 
-    @keyword_options.decorate(defaults)
-    def __init__(self,**kwargs):
-        keyword_options.process(self,kwargs)
-        #ct0_file,ct1_file = get_irf_file(self.irf,CALDB=self.CALDB)
+        Parameters
+        ----------
+        irf : [DEFAULT_IRF] IRF to use
+        CALDB : [None] path to override environment variable
+        use_phidep : [False] use azmithual dependence for effective area
+        """
+        self.irf = irf
         cdbm = pycaldb.CALDBManager(self.irf)
-        ct0_file,ct1_file = cdbm.get_aeff()
-        self._read_aeff(ct0_file,ct1_file)
-        if self.use_phidep:
-            self._read_phi(ct0_file,ct1_file)
+        hdus = [fits.open(f) for f in cdbm.get_aeff()]
+        self._aetabs = dict()
+        self._aeffs = dict()
+        self._p0tabs = dict()
+        self._p1tabs = dict()
+        for hdu in hdus:
+            for table in hdu:
+                dat = table.data
+                try:
+                    if not 'ENERG_LO' in table.columns.names:
+                        continue
+                except AttributeError:
+                    continue
+                elo = np.squeeze(dat['energ_lo'])
+                ehi = np.squeeze(dat['energ_hi'])
+                ecens = 0.5*(np.log10(elo) + np.log10(ehi))
+                clo = np.squeeze(dat['ctheta_lo'])
+                chi = np.squeeze(dat['ctheta_hi'])
+                ccens = 0.5*(clo + chi)
+                nc = len(clo)
+                ne = len(elo)
 
-    def _read_file(self,filename,tablename,columns):
-        hdu = fits.open(filename); table = hdu[tablename]
-        cbins = np.append(table.data.field('CTHETA_LO')[0],table.data.field('CTHETA_HI')[0][-1])
-        ebins = np.append(table.data.field('ENERG_LO')[0],table.data.field('ENERG_HI')[0][-1])
-        images = [np.asarray(table.data.field(c)[0],dtype=float).reshape(len(cbins)-1,len(ebins)-1) for c in columns]
-        hdu.close()
-        return ebins,cbins,images
+                if table.name.startswith('EFFECTIVE AREA'):
+                    event_type = table.name.split('_')[-1]
+                    ae = np.reshape(dat['effarea'],(nc,ne))
+                    # convert to cm^2 and swap to energy/cos(theta) order
+                    ae = ae.transpose()*1e4
+                    self._aeffs[event_type] = [elo,ehi,clo,chi,ae]
+                    self._aetabs[event_type] = InterpTable(ecens,ccens,ae)
 
-    def _read_aeff(self,ct0_file,ct1_file):
-        try:
-            ebins,cbins,feffarea = self._read_file(ct0_file,'EFFECTIVE AREA',['EFFAREA'])
-            ebins,cbins,beffarea = self._read_file(ct1_file,'EFFECTIVE AREA',['EFFAREA'])
-        except KeyError:
-            ebins,cbins,feffarea = self._read_file(ct0_file,'EFFECTIVE AREA_FRONT',['EFFAREA'])
-            ebins,cbins,beffarea = self._read_file(ct1_file,'EFFECTIVE AREA_BACK',['EFFAREA'])
-        self.ebins,self.cbins = ebins,cbins
-        self.feffarea = feffarea[0]*1e4;self.beffarea = beffarea[0]*1e4
-        self.aeff = InterpTable(np.log10(ebins),cbins)
-        self.faeff_aug = self.aeff.augment_data(self.feffarea)
-        self.baeff_aug = self.aeff.augment_data(self.beffarea)
+                elif table.name.startswith('PHI_DEPENDENCE'):
+                    event_type = table.name.split('_')[-1]
+                    p0 = np.reshape(dat['phidep0'],(nc,ne)).T
+                    p1 = np.reshape(dat['phidep1'],(nc,ne)).T
+                    self._p0tabs[event_type] = InterpTable(ecens,ccens,p0)
+                    self._p1tabs[event_type] = InterpTable(ecens,ccens,p1)
+            hdu.close()
 
-    def _read_phi(self,ct0_file,ct1_file):
-        try:
-            ebins,cbins,fphis = self._read_file(ct0_file,'PHI_DEPENDENCE',['PHIDEP0','PHIDEP1'])
-            ebins,cbins,bphis = self._read_file(ct1_file,'PHI_DEPENDENCE',['PHIDEP0','PHIDEP1'])
-        except KeyError:
-            ebins,cbins,fphis = self._read_file(ct0_file,'PHI_DEPENDENCE_FRONT',['PHIDEP0','PHIDEP1'])
-            ebins,cbins,bphis = self._read_file(ct1_file,'PHI_DEPENDENCE_BACK',['PHIDEP0','PHIDEP1'])
-        self.fphis = fphis; self.bphis = bphis
-        self.phi = InterpTable(np.log10(ebins),cbins,augment=False)
-
-    def _phi_mod(self,e,c,event_class,phi):
+    def _phi_mod(self,e,c,phi,event_type):
         # assume phi has already been reduced to range 0 to pi/2
-        if phi is None: return 1
-        tables = self.fphis if event_class==0 else self.bphis
-        par0 = self.phi(e,c,tables[0],bilinear=False)
-        par1 = self.phi(e,c,tables[1],bilinear=False,reset_indices=False)
+        if phi is None:
+            return 1.
+        par0 = self._p0tabs[event_type](e,c,bilinear=False)
+        par1 = self._p1tabs[event_type](e,c,bilinear=False)
         norm = 1. + par0/(1. + par1)
         phi = 2*abs((2./np.pi)*phi - 0.5)
         return (1. + par0*phi**par1)/norm
 
-    def __call__(self,e,c,phi=None,event_class=-1,bilinear=True):
+    def __call__(self,e,ctheta,event_type,phi=None,bilinear=True):
         """ Return bilinear (or nearest-neighbour) interpolation.
-            
-            Input:
-                e -- bin energy; potentially array
-                c -- bin cos(theta); potentially array
 
-            NB -- if e and c are both arrays, they must be of the same
-                  size; in other words, no outer product is taken
+        Parameters
+        ----------
+        e : energy (MeV)
+        ctheta : cosine incidence angle
+        event_type : e.g. FRONT, BACK, PSF0, ..., PSF3
+        phi : azimuthal angle mod pi/2 (rad)
+        bilinear : use bilinear interpolation for effective area calc
+
+        e and ctheta must be the same shape, or one must be a scalar.
         """
-        e = np.log10(e)
-        at = self.aeff
-        if event_class == -1:
-            return (at(e,c,self.faeff_aug,bilinear=bilinear)*self._phi_mod(e,c,0,phi),
-                    at(e,c,self.baeff_aug,bilinear=bilinear,reset_indices=False)*self._phi_mod(e,c,1,phi))
-        elif event_class == 0:
-            return at(e,c,self.faeff_aug)*self._phi_mod(e,c,0,phi)
-        return at(e,c,self.baeff_aug)*self._phi_mod(e,c,1,phi)
+        e = np.log10(np.atleast_1d(e))
+        c = np.atleast_1d(ctheta)
+        if (len(e) > 1) and (len(c) > 1):
+            assert(len(e)==len(c))
+        aeff = self._aetabs[event_type](e,c,bilinear=bilinear)
+        return aeff * self._phi_mod(e,c,phi,event_type)
 
-    def get_file_names(self):
-        return self.ct0_file,self.ct1_file
+    def image(self,event_types=['FRONT','BACK'],logea=False,fig_base=2,ctheta=0.99,show_image=False):
 
-    def image(self,event_class=-1,logea=False,fig_base=2,ctheta=0.99,show_image=False):
-
-        if event_class < 0: effarea = self.feffarea + self.beffarea
-        elif event_class == 0: effarea = self.feffarea
-        else: effarea = self.beffarea
-        ebins,cbins = self.ebins,self.cbins
+        effarea = np.sum([self._aeffs[et][-1] for et in event_types],axis=0)
+        elo,ehi,clo,chi,_ = self._aeffs[event_types[0]]
+        ebins = np.append(elo,ehi[-1])
+        cbins = np.append(clo,chi[-1])
 
         import pylab as pl
 
@@ -620,210 +830,147 @@ class EffectiveArea(object):
             #Generate a pseudo-color plot of the full effective area
             pl.figure(fig_base);pl.clf()
             pl.gca().set_xscale('log')
-            if logea: pl.gca().set_yscale('log')
-            pl.pcolor((ebins[:-1]*ebins[1:])**0.5,(cbins[:-1]+cbins[1:])/2.,effarea.reshape(len(cbins)-1,len(ebins)-1))
+            if logea:
+                pl.gca().set_yscale('log')
+            pl.pcolor((ebins[:-1]*ebins[1:])**0.5,(cbins[:-1]+cbins[1:])/2.,effarea.transpose(),shading='auto')
             pl.title('Effective Area')
             pl.xlabel('$\mathrm{Energy\ (MeV)}$')
-            pl.ylabel('$\mathrm{cos( \theta)}$')
+            pl.ylabel(r'$\mathrm{cos(\theta)}$')
             cb = pl.colorbar()
             cb.set_label('$\mathrm{Effective\ Area\ (m^2)}$')
 
-        #Generate a plot of the on-axis effective area with and without interpolation
-        energies = np.logspace(np.log10(ebins[0]),np.log10(ebins[-1]),8*(len(ebins)-1)+1)
-        f_vals,b_vals = np.array([self(e,ctheta,bilinear=True) for e in energies]).transpose()
-        pl.figure(fig_base+2);pl.clf()
+        colors = ['blue','red','orange','green']
+        pl.figure(fig_base+2)
+        pl.clf()
         pl.gca().set_xscale('log')
-        if logea: pl.gca().set_yscale('log')
-        pl.plot(energies,f_vals,label='front bilinear interp.',color='blue')
-        pl.plot(energies,b_vals,label='back bilinear interp.',color='red')
-        f_vals,b_vals = np.array([self(e,ctheta,bilinear=False) for e in energies]).transpose()
-        pl.plot(energies,f_vals,label='front nearest-neighbour interp.',color='blue')
-        pl.plot(energies,b_vals,label='back nearest-neighbour interp.',color='red')
+        if logea:
+            pl.gca().set_yscale('log')
+
+        energies = np.logspace(np.log10(ebins[0]),np.log10(ebins[-1]),32*(len(ebins)-1)+1)
+        for iet,et in enumerate(event_types):
+            vals = np.squeeze([self(e,ctheta,et,bilinear=True) for e in energies]).transpose()
+            pl.plot(energies,vals,label=f'{et} bilinear interp.',color=colors[iet])
+            vals = np.squeeze([self(e,ctheta,et,bilinear=False) for e in energies]).transpose()
+            pl.plot(energies,vals,label=f'{et} nearest-neighbour interp.',color=colors[iet])
         pl.title('On-axis Effective Area')
         pl.xlabel('$\mathrm{Energy\ (MeV)}$')
         pl.ylabel('$\mathrm{Effective\ Area\ (cm^2)}$')
         pl.legend(loc = 'lower right')
         pl.grid()
 
-class Exposure(object):
-    """ Integrate effective area and livetime over incidence angle."""
+class PSFCorrection(object):
+    """ Provide the PSF containment fraction at various incidence angles.
+    """
 
-    def __init__(self,ft2file,ft1files):
-        self.ft2file = ft2file
-        self.ea = EffectiveArea()
-        self.lt = Livetime(ft2file,ft1files)
-
-    def __call__(self,skydir,energies,event_class=-1,theta_cut=0.4,zenith_cut=-1):
-        binning = Binning(theta_bins=self.ea.cbins)
-        lt = self.lt(skydir,binning,theta_cut=theta_cut,zenith_cut=zenith_cut)
-        e_centers = np.asarray(energies)
-        c_centers = (lt[1][1:]+lt[1][:-1])/2.
-
-        #vals = self.ea(e_centers,(self.ea.cbins[:-1]+self.ea.cbins[1:])/2)
-        vals = np.empty([2 if event_class < 0 else 1,len(e_centers),len(c_centers)])
-        for i,ic in enumerate(c_centers):
-            vals[...,i] = self.ea(e_centers,ic,event_class=event_class)
-        vals *= lt[0]
-        return vals.sum(axis=-1)
-
-    def change_IRF(self,frontfile = None):
-        self.ea = EffectiveArea(frontfile = frontfile)
-        self.energies = self.event_class = None
-
-class ExposureSeries(object):
-    """ Encapsulate a time series of the exposures."""
-
-    def __init__(self,t1,t2,exposures,normalize=True):
-        """ t1 -- left edges of time series bins
-            t2 -- right edges of time series bins
-            exposures -- exposures for the bins; each entry may be an array
-                         over energy bins
+    def __init__(self,irf=DEFAULT_IRF,radius=3):
         """
-        self.t1 = t1; self.t2 = t2
-        self.times = (t1+t2)/2
-        self.t0 = (t2[-1]-t1[0])/2+1.23456789 # ad hoc epoch
-        self.exposures = exposures
-        if normalize:
-            for i in range(exposures.shape[0]):
-                exposures[i] /= exposures[i].sum()
-        self.sorting = np.arange(len(self.times))
+        Parameters
+        ----------
+        radius : aperture radius in degrees
+        """
+        self._psf = pypsf.CALDBPsf(irf=irf)
+        self._rad = np.radians(radius)
+        self._tables = dict()
+        for event_type in self._psf.event_types():
+            ecens = self._psf.ecens(event_type)
+            ccens = self._psf.ccens(event_type)
+            vals = np.empty((len(ecens),len(ccens)))
+            for ie,e in enumerate(ecens):
+                vals[ie] = self._psf.integral(e,event_type,self._rad)
+            table = InterpTable(np.log10(ecens),ccens,vals)
+            self._tables[event_type] = table
 
-    def get_mask(self,photon_times):
-        idx = np.searchsorted(self.t2,photon_times)
-        return photon_times >= self.t1[idx]
+    def __call__(self,e,ctheta,event_type):
+        """ Return the PSF containment for energy and incidence angle.
 
-    def __iter__(self):
-        self.counter = -1
-        return self
+        Parameters
+        ----------
+        e : energy (MeV)
+        ctheta : cosine incidence angle
+        event_type : e.g. FRONT, BACK, PSF0, ..., PSF3
+        """
+        return self._tables[event_type](np.log10(e),ctheta)
 
-    def next(self):
-        self.counter += 1
-        if self.counter == len(self.exposures):
-            raise StopIteration
-        return (self.exposures[self.counter])[self.sorting]
+def test_effective_area():
 
-    #def get_tstarts(self): return self.t1
-    #def get_tstops(self): return self.t2
-    def get_times(self): return self.times
-    def get_exposures(self,e): return self.exposures
-    def get_t0(self): return self.t0
-    def set_period(self,period,t0=None):
-        """ period, t0 in seconds; alter the phases, etc. to make
-            appropriate for cdf use."""
-        t0 = t0 or self.get_t0()
-        phi = np.mod((self.get_times()-t0)/period,1)
-        self.sorting = np.argsort(phi)
-        return phi[self.sorting]
-        # potentially faster - requires sorted times
-        #t  = self.get_times()
-        #p  = (t - t0)/period
-        #p += abs(int(p[0])) + 1
-        #p -= p.astype(int)
-        #return p
+    ea = EffectiveArea(irf=DEFAULT_IRF)
+    X,Y = np.meshgrid(np.arange(ea.ecens.shape[0]),np.arange(ea.ccens.shape[0]))
+    ecens = (10**ea.ecens)[X.transpose()]
+    ccens = ea.ccens[Y.transpose()]
 
-class ExposurePhase(object):
-    """ Compute phase of time intervals in FT2 file.  Primarily for 
-        building a properly phased orbital lightcurve.  (Accounts for 
-        barycentering...)
-    """
+    for bi in [True,False]:
+        faeff,baeff = ea(ecens,ccens,bilinear=bi)
+        #return faeff,ea.feffarea
+        assert(np.allclose(faeff,ea.feffarea))
+        assert(np.allclose(baeff,ea.beffarea))
+        faeff = ea(ecens,ccens,bilinear=bi,event_class=0)
+        baeff = ea(ecens,ccens,bilinear=bi,event_class=1)
+        assert(np.allclose(faeff,ea.feffarea))
+        assert(np.allclose(baeff,ea.beffarea))
 
-    def __init__(self,times,par,ft2='/edata/ft2.fits',output='ophase.fits',
-                 clobber=True,cleanup=False):
-        if clobber or (not os.path.exists(output)):
-            # write a temporary file with a TIME column
-            c = fits.Column(name='TIME',format='E',array=times)
-            tbhdu = fits.new_table([c],header=None)
-            tbhdu.writeto(output,clobber=True)
-            cmd = 'tempo2 -gr fermi -ft1 %s -ft2 %s -f %s -phase -ophase'%(output,ft2,par)
-            print('Executing: \n',cmd)
-            os.system(cmd)
-        f = fits.open(output)
-        self.phase = f[1].data.field('ORBITAL_PHASE')
-        f.close()
-        if cleanup:
-            os.remove(output)
+    # check that we extrapolate up to cos(theta) = 1 reliably
+    # TODO
 
-    def __call__(self):
-        return self.phase
-
-class ExposureSeriesFactory(object):
-    """A helper class to generate a simple exposure (evaluated at a
-       single energy) time series for use in looking for periodic signals
-       from sources with periods long enough to warrant exposure correction.
-    """
-
-    defaults = (
-        ('irf','P8_SOURCE_V3','IRF to use'),
-        ('zenith_cut',-1,'cut on cosine(zenith angle)'),
-        ('theta_cut',0.2,'cut on cosine(incidence angle)'),
-        ('eff_corr',True,'if True, apply correction for ghost events'),
-        ('use_phidep',True,'if True, apply azimuthal correction to effective area'),
-        ('lt_kwargs',{},'additional kwargs for Livetime object'),
-        ('ea_kwargs',{},'additional kwargs for EffectiveArea object'),
-        ('deadtime',False,'accumulate deadtime instead of livetime')
-    )
-
-    @keyword_options.decorate(defaults)
-    def __init__(self,ft1files,ft2files,**kwargs):
-        keyword_options.process(self,kwargs)
-        self.lt_kwargs.update({'deadtime':self.deadtime})
-        self.ea_kwargs.update({'use_phidep':self.use_phidep,'irf':self.irf})
-        self.lt = Livetime(ft2files,ft1files,**self.lt_kwargs)
-        self.ea = EffectiveArea(**self.ea_kwargs)
-
-    def get_livetime(self,energy,event_class=-1):
-        if self.eff_corr:
-            ec = EfficiencyCorrection(self.irf,energy)
-            lt0 = self.lt.LIVETIME*ec.get_efficiency(self.lt.LTFRAC,0)
-            lt1 = self.lt.LIVETIME*ec.get_efficiency(self.lt.LTFRAC,1)
-        else:
-            lt0 = lt1 = self.lt.LIVETIME
-        if event_class < 0:
-            return lt0,lt1
-        elif event_class == 0: return lt0
-        return lt1
-
-    def get_series(self,skydir,energies):
-        """ NB -- energy can be a vector or a scalar.
-            NB -- returns exposures summed over event class."""
-        if not hasattr(energies,'__iter__'): energies = [energies]
-        ra,dec = DEG2RAD*skydir.ra(),DEG2RAD*skydir.dec()
-        mask,pcosines,acosines = self.lt.get_cosines(ra,dec,self.theta_cut,self.zenith_cut,self.use_phidep)
-        if acosines is not None:
-            acosines = np.arccos(acosines)
-        exposures = np.empty([len(energies),mask.sum()])
-        for ien,en in enumerate(energies):
-            lt0,lt1 = self.get_livetime(en)
-            if not self.deadtime:
-                aeff = self.ea(en,pcosines,phi=acosines)
-                #exposures.append(aeff[0]*lt0[mask]+aeff[1]*lt1[mask])
-                exposures[ien,:] = aeff[0]*lt0[mask]+aeff[1]*lt1[mask]
-            else:
-                #exposures.append(self.lt.LIVETIME[mask])
-                exposure[ien,:] = self.lt.LIVETIME[mask]
-        return ExposureSeries(self.lt.START[mask],self.lt.STOP[mask],exposures)
+    return
 
 
-def test():
+
     import pylab as pl
-    xb = np.linspace(0,10,11)
-    yb = np.linspace(0,10,11)
-    data = np.arange(0.5,100).reshape(10,10)
-    #data = np.empty([10,10])
-    #for i in xrange(10):
-    #    data[i,:5] = i
-    #    data[i,5:] = i+0.5
-    ip2 = InterpTable(xb,yb)
-    data_aug = ip2.augment_data(data)
-    dom = np.linspace(0,10,1000)
-    cod = np.empty([len(dom),len(dom)])
-    for i in range(len(dom)):
-        cod[i,:] = ip2([dom[i]]*len(dom),dom,data_aug.transpose())
-    pl.figure(1);pl.clf();pl.imshow(data,interpolation='nearest')
-    pl.figure(2);pl.clf();pl.imshow(data,interpolation='bilinear')
-    pl.figure(3);pl.clf();pl.imshow(cod,interpolation='nearest',origin='upper')
-    pl.axvline(500,color='k')
-    for i in range(len(xb)):
-        pl.axhline(i*100,color='k')
-    pl.axis([0,1000,1000,0])
+    ea = EffectiveArea(use_phidep=True)
+    edom = np.logspace(2,5,5)
+    cdom = np.linspace(0.4,1.0,101)
+    aeff = np.empty((len(edom),len(cdom)))
+    phi = np.linspace(0,np.pi*0.5,101)
+    for ie in range(len(edom)):
+        aeff[ie] = ea(edom[ie],cdom,phi=phi)
+    #return aeff
+    pl.clf()
+    pl.imshow(aeff,interpolation='nearest',aspect='auto')
+    return ea,aeff
 
+def test_psf_correction():
+    pc = PSFCorrection(irf='P8R3_SOURCE_V3')
+
+    # checks on PSF itself: FRONT/BACk
+    cfac = pc._psf.integral(100,'FRONT',np.radians(3))
+    # cos theta bins increase, so these should be increasing too
+    assert(np.all(np.sort(cfac)==cfac))
+    # rough sanity checks on integral magnitude
+    cfac = pc._psf.integral(1000,'FRONT',np.radians(3))
+    assert(np.all(cfac>0.9))
+    cfac = pc._psf.integral(1000,'FRONT',np.radians(10))
+    assert(np.all(cfac>0.99))
+    # check back/front sense
+    cfac = pc._psf.integral(1000,'FRONT',np.radians(3))
+    assert(np.all(cfac>pc._psf.integral(1000,'BACK',np.radians(3))))
+
+    # checks on PSF itself: PSF Types
+    cfac = pc._psf.integral(100,'PSF3',np.radians(3))
+    # cos theta bins increase, so these should be increasing too
+    assert(np.all(np.sort(cfac)==cfac))
+    # rough sanity checks on integral magnitude
+    cfac = pc._psf.integral(1000,'PSF3',np.radians(3))
+    assert(np.all(cfac[1:]>0.9)) # PSF3 very bad at cos(theta)~0.4...
+    cfac = pc._psf.integral(1000,'PSF3',np.radians(10))
+    assert(np.all(cfac>0.95))
+    assert(np.all(cfac[2:]>0.99))
+    #cfac = pc._psf.integral(1000,'PSF3',np.radians(3))
+    #assert(np.all(cfac>pc._psf.integral(1000,'PSF0',np.radians(3))))
+
+    # checks on the table
+    ccens = pc._psf.ccens('FRONT')
+    eeval = 10**2.125
+    ffac = pc._psf.integral(eeval,'FRONT',np.radians(3))
+    bfac = pc._psf.integral(eeval,'BACK',np.radians(3))
+    ftest = pc(eeval,'FRONT',ccens)
+    btest = pc(eeval,'BACK',ccens)
+    assert(np.allclose(ftest,ffac))
+    assert(np.allclose(btest,bfac))
+    ftest = pc(100,'FRONT',ccens)
+    btest = pc(100,'BACK',ccens)
+    assert(np.all(ftest < ffac))
+    assert(np.all(btest < bfac))
+    # check interpolation in cos(theta)
+    assert(np.all(pc(100,'FRONT',1) > ftest))
+    assert(np.all(pc(100,'BACK',1) > btest))
+    
