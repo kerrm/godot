@@ -1247,21 +1247,38 @@ class Data(object):
             base_spectrum=None,use_weights_for_exposure=False,
             weight_cut=1,max_radius=None,bary_ft1files=None,
             tstart=None,tstop=None,apply_8year_scale=False,
-            verbosity=1,correct_efficiency=True,theta_cut=0.4):
-        """ The FT1 files, FT2 files;
-            ra, dec of source (deg)
-            weight_cut -- fraction of source photons to retain
-            max_radius -- maximum photon separation from source [deg]
-            bary_ft1files -- an optional mirrored set of FT1 files with
-                photon timestamps in the barycentric reference frame
-            tstart, tstop -- notionally MET, but will attempt to convert
-                from MJD if < 100,000.
+            verbosity=1,correct_efficiency=True,correct_cosines=True,
+            correct_exposure=False,correct_psf=True,use_psf_types=False,
+            theta_cut=0.4):
+        """ 
 
         Generally, the times for everything should be topocentric.
         However, if there is a need to search for short period signals,
         then barycentric times should be used.  Exposure calculations must
         still be topocentric, so the easiest solution is simply to provide
         both files.
+
+        Parameters
+        ----------
+        ft1files : the FT1 files
+        ft2files : the FT2 files
+        ra : R.A. of source (deg)
+        dec : Decl. of source (deg)
+        weight_cut : fraction of source photons to retain
+        max_radius : maximum photon separation from source [deg]
+        bary_ft1files : an optional mirrored set of FT1 files with
+            photon timestamps in the barycentric reference frame
+        tstart: cut time to apply to dataset; notionally MET, but will 
+            attempt to convert from MJD if < 100,000.
+        tstop : as tstart
+        apply_8year_scale : deprecated?
+        correct_efficiency: apply trigger efficiency (from livetime)
+        correct_cosines: apply in-bin S/C attitude correction
+        correct_exposure: apply in-bin exposure correction
+        correct_psf : apply aperture completeness correction
+        use_psf_types : use PSF-types IRF for exposure calculation
+        theta_cut : livetime cut on zenith angle (cosine(zenith))
+
         """
         self.ft1files = ft1files
         self.ft2files = ft2files
@@ -1279,36 +1296,50 @@ class Data(object):
         
         lt = py_exposure_p8.Livetime(ft2files,ft1files,
                 tstart=tstart,tstop=tstop,verbose=verbosity)
-        mask,pcosines,acosines = lt.get_cosines(
+        # TMP
+        self._lt = lt
+        # end TMP
+        mask,pcosines,acosines,START,STOP,LIVETIME = lt.get_cosines(
                 np.radians(ra),np.radians(dec),
                 theta_cut=theta_cut,
                 zenith_cut=np.cos(np.radians(zenith_cut)),
-                get_phi=use_phi)
+                get_phi=use_phi,apply_correction=correct_cosines)
         phi = np.arccos(acosines) if use_phi else None
         if use_weights_for_exposure:
             base_spectrum = None
         if correct_efficiency:
-            ltfrac = lt.LIVETIME[mask]/(lt.STOP[mask]-lt.START[mask])
+            ltfrac = LIVETIME/(STOP-START)
+            print(f'Median livetime fraction: {np.median(ltfrac):.2f}')
         else:
             ltfrac = None
-        aeff,self.total_exposure_edom,self.total_exposure = self._get_weighted_aeff(pcosines,phi,base_spectrum=base_spectrum,ltfrac=ltfrac)
-        exposure = np.zeros(len(mask))
-        exposure[mask] = aeff*lt.LIVETIME[mask]
+        aeff,texp_edom,texp = self._get_weighted_aeff(
+                pcosines,phi,base_spectrum=base_spectrum,ltfrac=ltfrac,
+                correct_psf=correct_psf,use_psf_types=use_psf_types)
+        self.total_exposure_edom = texp_edom
+        self.total_exposure = texp
+        exposure = aeff*LIVETIME
+
+        # TMP
+        if correct_exposure:
+            exposure = py_exposure_p8.adjust_exposure(START,STOP,exposure)
+
         # just get rid of any odd bins -- this cut corresponds to roughly
         # 30 seconds of exposure at the edge of the FoV; in practice it
         # doesn't remove too many photons
         self.minimum_exposure = minimum_exposure
-        full_mask = mask & (exposure>minimum_exposure)
-        exposure[~full_mask] = 0
+        minexp_mask = exposure > minimum_exposure
 
-        self.TSTART = lt.START[full_mask]
-        self.TSTOP = lt.STOP[full_mask]
-        self.LIVETIME = lt.LIVETIME[full_mask]
-        self.exposure = exposure[full_mask]
+        #self.TSTART = lt.START[full_mask]
+        #self.TSTOP = lt.STOP[full_mask]
+        #self.LIVETIME = lt.LIVETIME[full_mask]
+        self.TSTART = START[minexp_mask]
+        self.TSTOP = STOP[minexp_mask]
+        self.LIVETIME = LIVETIME[minexp_mask]
+        self.exposure = exposure[minexp_mask]
         self.cexposure = np.cumsum(self.exposure)
         # TMP?
-        self._pcosines = pcosines[full_mask[mask]] # eww
-        self._acosines = acosines[full_mask[mask]]
+        self._pcosines = pcosines[minexp_mask]
+        self._acosines = acosines[minexp_mask]
 
         data,self.timeref,photon_idx = self._load_photons(
                 ft1files,weight_col,self.TSTART[0],self.TSTOP[-1],
@@ -1318,10 +1349,14 @@ class Data(object):
             print('WARNING!!!!  Barycentric data not accurately treated')
         
         # this is a problem if the data are barycentered
-        event_idx = np.searchsorted(lt.STOP,ti)
-        # TODO add a check for FT2 files that are shorter than observation
-        event_mask = self.event_mask = exposure[event_idx] > 0
+        event_idx = np.clip(np.searchsorted(self.TSTOP,ti),0,len(self.TSTOP)-1)
+        event_mask = (ti >= self.TSTART[event_idx]) & (ti <= self.TSTOP[event_idx])
+        # This should be redundant at this point
         event_mask &= lt.get_gti_mask(ti)
+        self.event_mask = event_mask
+
+
+        # TODO add a check for FT2 files that are shorter than observation
 
         data = [d[event_mask].copy() for d in data]
         self.ti = data[0]
@@ -1338,17 +1373,12 @@ class Data(object):
         if use_weights_for_exposure:
             print('beginning exposure refinement')
             # do a refinement of exposure calculation
-            aeff,self.total_exposure_edom,self.total_exposure = self._get_weighted_aeff(pcosines,phi,base_spectrum=None,use_event_weights=True,livetime=lt.LIVETIME[mask])
+            aeff,self.total_exposure_edom,self.total_exposure = self._get_weighted_aeff(pcosines,phi,base_spectrum=None,use_event_weights=True,livetime=self.LIVETIME)
             print('finished exposure refinement')
 
 
         # do another sort into the non-zero times
         event_idx = self.event_idx = np.searchsorted(self.TSTOP,self.ti)
-
-        # NEEDED?
-        #print 'beginning photon exposure'
-        #self.photon_exposure = self.get_exposure(self.ti)
-        #print 'ending photon exposure'
 
         self.weight_cut = weight_cut
         if weight_cut < 1:
@@ -1385,30 +1415,43 @@ class Data(object):
         self.__dict__.update(state)
 
     def _get_weighted_aeff(self,pcosines,phi,base_spectrum=None,
-            use_event_weights=False,livetime=None,ltfrac=None):
+            use_event_weights=False,livetime=None,ltfrac=None,
+            correct_psf=True,use_psf_types=False):
+
         ea = py_exposure_p8.EffectiveArea(use_phidep=phi is not None)
-        if ltfrac is not None:
-            # evaluate efficiency correction
-            ec = py_exposure_p8.EfficiencyCorrection()
-            feffic = ec.get_efficiency(ltfrac,conversion_type=0)
-            beffic = ec.get_efficiency(ltfrac,conversion_type=1)
+        if correct_psf:
+            pc = py_exposure_p8.PSFCorrection()
         else:
-            feffic = beffic = None
+            pc = None
+        if ltfrac is not None:
+            ec = py_exposure_p8.EfficiencyCorrection()
+        else:
+            ec = None
+
+        if use_psf_types:
+            event_types = [f'PSF{i}' for i in range(4)]
+        else:
+            event_types = ['FRONT','BACK']
+
         if base_spectrum is not None:
             edom = np.logspace(2,5,25)
             wts = base_spectrum(edom)
+            # this is the exposure as a function of energy
             total_exposure = np.empty_like(edom)
-            wts = base_spectrum(edom)
-            rvals = np.empty([len(edom),len(pcosines)])
+            rvals = np.zeros([len(edom),len(pcosines)])
             for i,(en,wt) in enumerate(zip(edom,wts)):
-                faeff,baeff = ea([en],pcosines,phi=phi)
-                if ltfrac is not None:
-                    rvals[i] = (faeff*feffic+baeff*beffic)*wt
-                else:
-                    rvals[i] = (faeff+baeff)*wt
-                total_exposure[i] = rvals[i].sum()/wt
+                for event_type in event_types:
+                    aeff = ea(en,pcosines,event_type,phi=phi)
+                    if pc is not None:
+                        aeff *= pc(en,pcosines,event_type)
+                    if ec is not None:
+                        aeff *= ec(en,ltfrac,event_type)
+                    rvals[i] += aeff
+                total_exposure[i] = rvals[i].sum()
+                rvals[i] *= wt
             aeff = simps(rvals,edom,axis=0)/simps(wts,edom)
         elif use_event_weights:
+            raise NotImplementedError()
             # TODO -- this is a real mess.  Make this more consistent
             # or else break it out.  On the bright sde, it seems to work!
             # also, this can be speeded up substantially by binning in cos
@@ -1437,7 +1480,8 @@ class Data(object):
             aeff = simps(rvals,edom,axis=0)/simps(wts,edom)
         else:
             edom = [1000]
-            faeff,baeff = ea([1000],pcosines,phi=phi)
+            faeff = ea([1000],pcosines,'FRONT',phi=phi)
+            baeff = ea([1000],pcosines,'BACK',phi=phi)
             aeff = faeff+baeff
             total_exposure = [aeff.sum()]
         return aeff,edom,total_exposure
@@ -1548,39 +1592,9 @@ class Data(object):
         max_interval -- maximum acceptable break in exposure for a
             contiguous interval [10s]
         """
-
-        t0s = self.TSTART
-        t1s = self.TSTOP
-        if tstart is not None:
-            idx = np.searchsorted(t1s,tstart)
-            t0s = t0s[idx:].copy()
-            t1s = t1s[idx:].copy()
-            if tstart < t0s[0]:
-                tstart = t0s[0]
-            else:
-                t0s[0] = tstart
-        if tstop is not None:
-            idx = np.searchsorted(t1s,tstop)
-            t0s = t0s[:idx].copy()
-            t1s = t1s[:idx].copy()
-            if tstop < t0s[-1]:
-                t0s = t0s[:-1]
-                t1s = t1s[:-1]
-                tstop = t1s[-1]
-            else:
-                t1s[-1] = tstop
-
-        break_mask = (t0s[1:]-t1s[:-1])>max_interval
-        break_starts = t1s[:-1][break_mask]
-        break_stops = t0s[1:][break_mask]
-        # now assumble the complement
-        good_starts = np.empty(len(break_starts)+1)
-        good_stops = np.empty_like(good_starts)
-        good_starts[0] = t0s[0]
-        good_starts[1:] = break_stops
-        good_stops[-1] = t1s[-1]
-        good_stops[:-1] = break_starts
-        return good_starts,good_stops
+        return py_exposure_p8.get_contiguous_exposures(
+                self.TSTART,self.TSTOP,tstart=tstart,tstop=tstop,
+                max_interval=max_interval)
 
     def get_photon_cells(self,tstart,tstop,max_interval=30):
         """ Return starts, stops, and exposures for photon-based cells.
