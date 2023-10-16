@@ -1,10 +1,8 @@
 """
-A module to manage the PSF from CALDB and handle the integration over
-incidence angle and intepolation in energy required for the binned
-spectral analysis.
-$Header: /nfs/slac/g/glast/ground/cvs/pointlike/python/uw/like/pypsf.py,v 1.39 2017/08/16 19:57:07 burnett Exp $
-author: M. Kerr
+Refactored pointlike code to load PSF parameters from CALDB and 
+implement evaluation of the PSF and its integral.
 
+author: M. Kerr
 """
 
 from astropy.io import fits
@@ -70,7 +68,7 @@ class CALDBPsf(object):
                     val = np.squeeze(table.data.field('PSFSCALE'))
                     sf = np.squeeze(val)
                     self._scale_funcs[event_type] = PSFScaleFunc(sf)
-                if table.name.startswith('RPSF'):
+                elif table.name.startswith('RPSF'):
                     event_type = table.name.split('_')[-1]
                     dat = table.data
                     ebounds,cbounds,psf_params = tab(dat)
@@ -131,7 +129,7 @@ class CALDBPsf(object):
 
         Returns
         -------
-        The PSF density in each cosine theta bin
+        The PSF density in each cosine theta bin.
         """
         sf = self._scale_funcs[event_type](e) if scale_sigma else 1
         nc,nt,gc,gt,sc,st = self.get_p(e,event_type)
@@ -148,6 +146,7 @@ class CALDBPsf(object):
             e : energy in MeV
             event_type : e.g. FRONT, BACK, PSF0, ..., PSF3
             dmax : integral upper bound (radians)
+            dmin : optional inner integral bound
 
             Returns
             -------
@@ -164,30 +163,36 @@ class CALDBPsf(object):
     def inverse_integral(self,e,event_type,percent=68,on_axis=False):
         """Determine radius at which integral PSF contains specified pctg.
 
+        This is a pretty inefficient method, only to be used for descriptive
+        work!
+
         Parameters
         ----------
         e : energy in MeV
         event_type : e.g. FRONT, BACK, PSF0, ..., PSF3
+        percent : fraction of PSF support to obtain
+        on_axis : if True, only use the 0.9-1.0 cos(theta) bin
 
         Returns
         -------
-        val : PSF radius in degrees
+        val : PSF radius in degrees for each cosine theta bin
         """
         percent = float(percent)/100
         if on_axis:
             sf = self._scale_funcs[event_type](e)
-            nc,nt,gc,gt,sc,st,w = self.get_p(e,event_type)
-            u1 = gc[0]*( (1-percent)**(1./(1-gc[0])) - 1)
-            u2 = gt[0]*( (1-percent)**(1./(1-gt[0])) - 1)
-            return np.degrees(sf*(nc[0]*(u1*2)**0.5*sc[0] + nt[0]*(u2*2)**0.5*st[0])) #approx
-        f = lambda x: abs(self.integral(e,ct,x) - percent)
+            nc,nt,gc,gt,sc,st = self.get_p(e,event_type)
+            u1 = gc[-1]*( (1-percent)**(1./(1-gc[-1])) - 1)
+            u2 = gt[-1]*( (1-percent)**(1./(1-gt[-1])) - 1)
+            return np.degrees(sf*(nc[-1]*(u1*2)**0.5*sc[-1] + nt[-1]*(u2*2)**0.5*st[-1])) #approx
         from scipy.optimize import fmin
         seeds = np.asarray([5,4,3,2.5,2,1.5,1,0.5,0.25])*self._scale_funcs[event_type](e)
-        seedvals = np.asarray([self.integral(e,ct,x) for x in seeds])
-        seed = seeds[np.argmin(np.abs(seedvals-percent))]
-        trial = fmin(f,seed,disp=0,ftol=0.000001,xtol=0.01)
-        if trial > 0:
-            return np.degrees(trial[0])
-        print('Warning: could not invert integral; return best grid value.')
-        return np.degrees(seed)
+        seedvals = np.asarray([self.integral(e,event_type,x) for x in seeds])
+        seeds = seeds[np.argmin(np.abs(seedvals-percent),axis=0)]
+        rvals = np.full(seeds.shape,np.nan)
+        for iseed,seed in enumerate(seeds):
+            f = lambda x: abs(self.integral(e,event_type,x)[iseed] - percent)
+            trial = fmin(f,seed,disp=0,ftol=0.000001,xtol=0.01)
+            if trial > 0:
+                rvals[iseed] = trial
+        return np.degrees(rvals)
 
