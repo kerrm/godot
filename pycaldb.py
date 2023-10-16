@@ -67,8 +67,11 @@ class CALDBManager(object):
 
         self.load_caldb_indx()
         self.construct_psf()
-        if not self.quiet: print ('PSF: %s' % self.psf_files)
+        if not self.quiet:
+            print ('PSF: %s' % self.psf_files)
         self.construct_aeff()
+        if not self.quiet:
+            print ('AEFF: %s' % self.aeff_files)
         #self.construct_edisp()
  
     def __repr__(self):
@@ -93,11 +96,13 @@ class CALDBManager(object):
 
         # see if the psf should be overloaded
         if self.psf_irf is None:
-            irf=self.irf
+            irf = self.irf
         else:
-            if not self.quiet: print ('Overriding default PSF; using %s'%(self.psf_irf))
-            irf=self.psf_irf
-        #Just handle Pass 8 separately for now
+            if not self.quiet:
+                print (f'Overriding default PSF with {self.psf_irf}.')
+            irf = self.psf_irf
+
+        # just handle Pass 8 separately for now
         if self.irf.startswith('P8'):
             #try the caldb index
             self.available_event_types = ('FRONT','BACK','PSF0','PSF1','PSF2','PSF3')
@@ -138,13 +143,22 @@ class CALDBManager(object):
               % (irf, self.custom_irf_dir, self.psf_files) )
     
     def construct_aeff(self):
-        irf = self.irf
 
-        self.aeff_files = [join(self.bcf,'ea','aeff_%s_%s.fits'%(irf,i)) for i in ['front','back']]
+        # just handle Pass 8 separately for now
+        if self.irf.startswith('P8'):
+            #try the caldb index
+            self.available_event_types = ('FRONT','BACK','PSF0','PSF1','PSF2','PSF3')
+            self.aeff_files = [join(self.bcf,'ea','aeff_%s_%s.fits'%(self.irf,i)) for i in ('FB','PSF')]
 
-        if os.path.exists(self.aeff_files[0]) and os.path.exists(self.aeff_files[1]):
+        else:
+            # see if the psf name is directly in the filename.
+            self.available_event_types = ('FRONT','BACK')
+            self.aeff_files = [join(self.bcf,'ea','aeff_%s_%s.fits'%(self.irf,i)) for i in ('front','back')]
+
+        if np.all([os.path.exists(f) for f in self.aeff_files]):
             return
 
+        irf = self.irf
         # try to read form caldb index
         try:
             front=np.where((np.char.find(self.irf_names,irf)!=-1)&(self.irf_types=='EFF_AREA')&(self.conv_types=='FRONT'))[0]
@@ -169,11 +183,11 @@ class CALDBManager(object):
 
         raise Exception("Unable to find effective area for the irf %s." % irf)
 
-
     def construct_edisp(self):
         raise NotImplementedException("No current need for this function.")
 
-    def get_psf(self): return self.psf_files
+    def get_psf(self):
+        return self.psf_files
 
     def get_aeff(self): 
         return self.aeff_files
