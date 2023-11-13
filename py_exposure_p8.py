@@ -18,18 +18,15 @@ from os.path import join
 # third-party packages
 import numpy as np
 from astropy.io import fits
-from scipy.interpolate import interp1d
+from scipy.interpolate import interp1d,splrep,BSpline
 
 # fermitools
 import pycaldb
 import pypsf
-# TMP
-from importlib import reload
-reload(pypsf)
-# END TMP
 import keyword_options
 from gti import Gti
 
+dbug = dict()
 
 DEG2RAD = np.pi/180.
 EQUATORIAL = 1
@@ -92,8 +89,15 @@ def get_contiguous_exposures(TSTART,TSTOP,tstart=None,tstop=None,
     return good_starts,good_stops
 
 def adjust_cosines(TSTART,TSTOP,pcosines,acosines=None,zcosines=None,
-        oversample=None):
+        oversample=False):
+    """ Interpolate in polar angle, azimuth, and zenith.
+    """
 
+    dbug['T0'] = TSTART
+    dbug['T1'] = TSTOP
+    dbug['pcos0'] = pcosines
+    dbug['acos0'] = acosines
+    dbug['zcos0'] = zcosines
     assert(len(pcosines)==len(TSTART))
     _,_,idx = get_contiguous_exposures(TSTART,TSTOP,get_indices=True)
     edges = np.append(0,idx)
@@ -124,9 +128,9 @@ def adjust_cosines(TSTART,TSTOP,pcosines,acosines=None,zcosines=None,
         m[-1] = m[-2]*dx[-1]/dx[-2]
 
         if oversample:
-            rvals = np.empty(len(x)*2)
-            rvals[0::2] = y[::2] + m*0.25
-            rvals[1::2] = y[::2] + m*0.75
+            rvals = np.empty(len(y)*2)
+            rvals[0::2] = y + m*0.25
+            rvals[1::2] = y + m*0.75
         else:
             rvals = y + m*0.5
 
@@ -145,10 +149,90 @@ def adjust_cosines(TSTART,TSTOP,pcosines,acosines=None,zcosines=None,
                     dx,acosines[i0:i1],oversample=oversample,clip_min=0)
         if zrvals is not None:
             zrvals[mi0:mi1] = interpolate(
-                    dx,zcosines[i0:i1],oversample=oversample,clip_min=0)
+                    dx,zcosines[i0:i1],oversample=oversample)
     # TMP
     assert(not np.any(np.isnan(prvals)))
+    dbug['pcos1'] = prvals
+    dbug['acos1'] = arvals
+    dbug['zcos1'] = zrvals
     return prvals,arvals,zrvals
+
+def adjust_cosines2(TSTART,TSTOP,pcosines,acosines,zcosines,
+        oversample=False):
+    dbug['pcos0'] = pcosines.copy()
+    dbug['acos0'] = acosines.copy()
+    dbug['zcos0'] = zcosines.copy()
+    dbug['t0'] = TSTART.copy()
+    dbug['t1'] = TSTOP.copy()
+    # find breaks in the orbit
+    idx = np.flatnonzero(TSTART[1:]-TSTOP[:-1] > 30.1)
+    i0s = np.append(0,idx+1)
+    i1s = np.append(idx+1,len(TSTART)+1)
+    if oversample:
+        tmid = np.empty(len(TSTART)*2)
+        dt = TSTOP-TSTART
+        tmid[0::2] = TSTART + 0.25*dt
+        tmid[1::2] = TSTART + 0.75*dt
+    else:
+        tmid = 0.5*(TSTART+TSTOP)
+
+    n_in_seg = i1s-i0s
+    mask = n_in_seg > 1
+
+    N = 2*len(pcosines) if oversample else len(pcosines)
+    pvals = np.full(N,np.nan)
+    avals = np.full(N,np.nan)
+    zvals = np.full(N,np.nan)
+
+    if not oversample:
+        carryover = i0s[~mask]
+        pvals[carryover] = pcosines[carryover]
+        avals[carryover] = acosines[carryover]
+        zvals[carryover] = zcosines[carryover]
+    else:
+        for idx in i0s[~mask]:
+            pvals[2*idx:2*(idx+1)] = pcosines[idx]
+            avals[2*idx:2*(idx+1)] = acosines[idx]
+            zvals[2*idx:2*(idx+1)] = zcosines[idx]
+
+    i0s = i0s[mask]
+    i1s = i1s[mask]
+
+    if not oversample:
+        dst_i0 = i0s
+        dst_i1 = i1s
+    else:
+        dst_i0 = 2*i0s
+        dst_i1 = 2*i1s
+
+    for i0,i1,di0,di1 in zip(i0s,i1s,dst_i0,dst_i1):
+
+        x0 = TSTART[i0:i1]
+        xmid = tmid[di0:di1]
+
+        s = splrep(x0,pcosines[i0:i1],k=1)
+        pvals[di0:di1] = BSpline(*s,extrapolate=True)(xmid)
+
+        s = splrep(x0,acosines[i0:i1],k=1)
+        avals[di0:di1] = BSpline(*s,extrapolate=True)(xmid)
+
+        s = splrep(x0,zcosines[i0:i1],k=1)
+        zvals[di0:di1] = BSpline(*s,extrapolate=True)(xmid)
+
+    print((avals<0).sum())
+    print((avals>1).sum())
+    print((pvals>1).sum())
+    assert(not np.any(np.isnan(pvals)))
+    assert(not np.any(np.isnan(avals)))
+    assert(not np.any(np.isnan(zvals)))
+    avals[avals<0] = np.abs(avals[avals<0])
+    avals[avals>1] = 2-(avals[avals>1])
+    pvals[pvals>1] = 2-(pvals[pvals>1])
+    zvals[zvals>1] = 2-(zvals[zvals>1])
+    dbug['pcos1'] = pvals.copy()
+    dbug['acos1'] = avals.copy()
+    dbug['zcos1'] = zvals.copy()
+    return pvals,avals,zvals
 
 # This is an adhoc attempt to correct exposure to bin center AFTER collapse
 # to a scalar.  Fast but not very useful...?
@@ -539,7 +623,7 @@ class Livetime(object):
 
         Parameters
         ----------
-        ra : right ascention (radians)
+        ra : right ascension (radians)
         dec : declination (radians)
         theta_cut : cosine(theta_max)
         zenith_cut : cosine(zenith_max)
@@ -565,16 +649,21 @@ class Livetime(object):
 
         # cosine(polar angle) of source in S/C system
         pcosines  = self.COS_DEC_SCZ*cdec*np.cos(ra-self.RA_SCZ) + self.SIN_DEC_SCZ*sdec
-        #mask = pcosines >= theta_cut
 
-        if zenith_cut > -1:
-            # cosine(polar angle) between source and zenith
-            zcosines = self.COS_DEC_ZENITH*cdec*np.cos(ra-self.RA_ZENITH) + self.SIN_DEC_ZENITH*sdec
-            #mask = mask & (zcosines>=zenith_cut)
+        # cosine(polar angle) between source and zenith
+        zcosines = self.COS_DEC_ZENITH*cdec*np.cos(ra-self.RA_ZENITH) + self.SIN_DEC_ZENITH*sdec
+
+        # make a preliminary rough cut to speed things up
+        mask = (pcosines > (theta_cut-0.15)) & (zcosines >= (zenith_cut-0.15))
+        pcosines = pcosines[mask]
+        zcosines = zcosines[mask]
+        T0 = self.START[mask]
+        T1 = self.STOP[mask]
+        LT = self.LIVETIME[mask]
 
         if get_phi:
             ra_s = self.RA_SCX
-            acosines = self.COS_DEC_SCX*cdec*np.cos(ra-self.RA_SCX) + self.SIN_DEC_SCX*sdec
+            acosines = self.COS_DEC_SCX[mask]*cdec*np.cos(ra-self.RA_SCX[mask]) + self.SIN_DEC_SCX[mask]*sdec
             # the (1-pcosine^2)**0.5 normalizes the vector to the X/Y plane,
             # so that the remaining portion is just the source vector
             # projected onto the x axis; and the abs/clip folds to 0 to pi/2
@@ -582,10 +671,9 @@ class Livetime(object):
             np.clip(np.abs(acosines/(1-pcosines**2)**0.5),0,1,out=acosines)
         else:
             acosines = None
+
         if oversample:
-            T0 = self.START#[mask]
-            T1 = self.STOP#[mask]
-            pcosines,acosines,zcosines = adjust_cosines(
+            pcosines,acosines,zcosines = adjust_cosines2(
                     T0,T1,pcosines,acosines,zcosines,oversample=True)
             dT = T1-T0
             new_T0 = np.empty(len(T0)*2)
@@ -595,21 +683,27 @@ class Livetime(object):
             new_T1[0::2] = new_T0[1::2]
             new_T1[1::2] = T1
             new_LT = np.empty(len(T0)*2)
-            new_LT[0::2] = 0.5*self.LIVETIME#[mask]
-            new_LT[1::2] = 0.5*self.LIVETIME#[mask]
-            mask = (pcosines >= theta_cut) & (zcosines >= zenith_cut)
+            new_LT[0::2] = 0.5*self.LIVETIME[mask]
+            new_LT[1::2] = 0.5*self.LIVETIME[mask]
+            new_mask = np.empty(len(mask)*2,dtype=bool)
+            new_mask[0::2] = mask
+            new_mask[1::2] = mask
             assert(len(pcosines)==len(new_T0))
-            return mask,pcosines[mask],acosines[mask],new_T0[mask],new_T1[mask],new_LT[mask]
-            # OK, tomorrow: doing the mask at the beginning doesn't make
-            # much of a difference but speeds things up a lot, so let's
-            # revert to that (?)
-        if apply_correction:
-            T0 = self.START#[mask]
-            T1 = self.STOP#[mask]
-            pcosines,acosines,zcosines = adjust_cosines(
+            T0 = new_T0
+            T1 = new_T1
+            LT = new_LT
+            mask = new_mask
+
+        elif apply_correction:
+            pcosines,acosines,zcosines = adjust_cosines2(
                     T0,T1,pcosines,acosines,zcosines,oversample=False)
-        mask = (pcosines >= theta_cut) & (zcosines >= zenith_cut)
-        return mask,pcosines[mask],acosines[mask],self.START[mask],self.STOP[mask],self.LIVETIME[mask]
+
+        # make final mask
+        fmask = (pcosines >= theta_cut) & (zcosines >= zenith_cut)
+        mask[mask] = fmask
+        if acosines is not None:
+            acosines = acosines[fmask]
+        return mask,pcosines[fmask],acosines,T0[fmask],T1[fmask],LT[fmask]
 
     def _do_bin(self,binning,mask,pcosines,acosines,time_range=None):
         weights = self.LIVETIME[mask]
@@ -973,4 +1067,27 @@ def test_psf_correction():
     # check interpolation in cos(theta)
     assert(np.all(pc(100,'FRONT',1) > ftest))
     assert(np.all(pc(100,'BACK',1) > btest))
-    
+
+def aeff_corr(pcos,acos):
+    """ Need to apply a 2D correction."""
+    rvals = np.ones_like(pcos)
+    corrections = [
+           [[0.00,0.25],[[0.35,0.7,0.99],[0.88,0.91,1.025],[0.96,0.99,0.989]]],
+           [[0.25,0.50],[[0.85,0.89,1.013],[0.89,0.93,0.99],[0.99,1.00,1.03]]],
+           [[0.50,0.75],[[0.35,0.57,0.975],[0.74,0.85,1.015],[0.86,0.91,0.985],[0.99,1.00,1.05]]],
+           [[0.75,1.00],[[0.99,1.00,1.025]]]]
+    for c in corrections:
+        abounds,pcorrs = c
+        amask = (acos >= abounds[0]) & (acos < abounds[1])
+        idx = np.flatnonzero(amask)
+        masked_pcos = pcos[amask]
+        for pcorr in pcorrs:
+            pmask = (masked_pcos >= pcorr[0]) & (masked_pcos < pcorr[1])
+            rvals[idx[pmask]] = pcorr[2]
+
+    # Now apply a phi correction for a range of polar angle
+    mask = (pcos >= 0.6) & (pcos < 0.8) & (acos < 0.1)
+    rvals[mask] *= 1.025
+
+    return rvals
+

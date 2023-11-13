@@ -10,6 +10,8 @@ from scipy.stats import chi2
 
 import bary
 import py_exposure_p8
+from importlib import reload
+reload(py_exposure_p8)
 
 # MET bounds for 8-year data set used for FL8Y and 4FGL
 t0_8year = 239557007.6
@@ -1248,7 +1250,7 @@ class Data(object):
             weight_cut=1,max_radius=None,bary_ft1files=None,
             tstart=None,tstop=None,apply_8year_scale=False,
             verbosity=1,correct_efficiency=True,correct_cosines=True,
-            correct_exposure=False,correct_psf=True,use_psf_types=False,
+            correct_psf=True,use_psf_types=False,correct_aeff=False,
             theta_cut=0.4):
         """ 
 
@@ -1273,12 +1275,19 @@ class Data(object):
         tstop : as tstart
         apply_8year_scale : deprecated?
         correct_efficiency: apply trigger efficiency (from livetime)
-        correct_cosines: apply in-bin S/C attitude correction
-        correct_exposure: apply in-bin exposure correction
+        correct_cosines: apply in-bin S/C attitude correction;  see below
         correct_psf : apply aperture completeness correction
+        correct_aeff : apply very minor correction (~1%) estimated from
+            Vela and Geminga
         use_psf_types : use PSF-types IRF for exposure calculation
         theta_cut : livetime cut on zenith angle (cosine(zenith))
 
+        The FT2 values are tabulated such that the S/C position is given
+        at the START time.  Whereas the livetime etc. are accumulated over
+        the full (~30s) interval.  The upshot is that the position is off
+        by ~15s when evaluating the exposure.  Using correct_cosines will
+        attempt to interpolate the S/C attitude between START and FINISH
+        and will then use that for the exposure calculation.
         """
         self.ft1files = ft1files
         self.ft2files = ft2files
@@ -1297,9 +1306,9 @@ class Data(object):
         lt = py_exposure_p8.Livetime(ft2files,ft1files,
                 tstart=tstart,tstop=tstop,verbose=verbosity)
         # TMP
-        self._lt = lt
+        #self._lt = lt
         # end TMP
-        mask,pcosines,acosines,START,STOP,LIVETIME = lt.get_cosines(
+        _,pcosines,acosines,START,STOP,LIVETIME = lt.get_cosines(
                 np.radians(ra),np.radians(dec),
                 theta_cut=theta_cut,
                 zenith_cut=np.cos(np.radians(zenith_cut)),
@@ -1319,13 +1328,19 @@ class Data(object):
         self.total_exposure = texp
         exposure = aeff*LIVETIME
 
-        # TMP
-        if correct_exposure:
-            exposure = py_exposure_p8.adjust_exposure(START,STOP,exposure)
+        if correct_aeff:
+            correction = py_exposure_p8.aeff_corr(pcosines,acosines)
+            exposure = exposure * correction
 
         # just get rid of any odd bins -- this cut corresponds to roughly
         # 30 seconds of exposure at the edge of the FoV; in practice it
         # doesn't remove too many photons
+
+        # !!!
+        # TMP -- decrease minimum exposure when oversampling!!
+        minimum_exposure *= 0.5
+        # !!!
+
         self.minimum_exposure = minimum_exposure
         minexp_mask = exposure > minimum_exposure
 
@@ -1337,9 +1352,10 @@ class Data(object):
         self.LIVETIME = LIVETIME[minexp_mask]
         self.exposure = exposure[minexp_mask]
         self.cexposure = np.cumsum(self.exposure)
-        # TMP?
+        ## TMP?
         self._pcosines = pcosines[minexp_mask]
         self._acosines = acosines[minexp_mask]
+        ## end TMP?
 
         data,self.timeref,photon_idx = self._load_photons(
                 ft1files,weight_col,self.TSTART[0],self.TSTOP[-1],
