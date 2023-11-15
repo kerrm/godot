@@ -8,7 +8,7 @@ from os.path import join
 import astropy.io.fits as fits
 import numpy as np
 
-import keyword_options
+from .import keyword_options
 
 class CALDBManager(object):
     """ This object abstracts access to IRF files which can be

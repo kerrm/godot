@@ -1,6 +1,8 @@
-import core
 import pickle
+
 from astropy.io import fits
+
+from . import core
 
 data_path = '/data/kerrm/photon_data'
 

@@ -1,7 +1,10 @@
 """ Use astropy to quickly convert Fermi METs to TDB at the barycenter.
 """
 
-from astropy import constants as const, coordinates as coord, time, units as u
+from astropy import constants as const
+from astropy import coordinates as coord
+from astropy import time
+from astropy import units as u
 import numpy as np
 
 def met2mjd(times,mjdref=51910+7.428703703703703e-4):

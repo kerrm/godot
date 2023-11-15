@@ -1,10 +1,10 @@
-from __future__ import print_function
-import core
-from core import mjd2met,met2mjd
-from load_data import get_data
 import pylab as pl
 import numpy as np
 from scipy.stats import chi2,norm
+
+from . import core
+from .core import mjd2met,met2mjd
+from .load_data import get_data
 
 def set_rcParams(ticklabelsize='medium',bigticks=False):
     import matplotlib

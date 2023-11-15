@@ -1,8 +1,8 @@
-import core; reload(core)
-from load_data import get_data
-
 import numpy as np
 from collections import deque
+
+from . import core
+from .load_data import get_data
 
 
 # New code for eclipse stuff

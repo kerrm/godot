@@ -11,20 +11,18 @@ Requires: Fermi ScienceTools
 author(s): Matthew Kerr
 """
 from collections import deque
-from math import sin,cos
 import os
 from os.path import join
 
-# third-party packages
 import numpy as np
 from astropy.io import fits
 from scipy.interpolate import interp1d,splrep,BSpline
 
 # fermitools
-import pycaldb
-import pypsf
-import keyword_options
-from gti import Gti
+from . import pycaldb
+from . import pypsf
+from . import keyword_options
+from .gti import Gti
 
 dbug = dict()
 

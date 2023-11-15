@@ -8,7 +8,7 @@ author: M. Kerr
 from astropy.io import fits
 import numpy as np
 
-import pycaldb
+from . import pycaldb
 
 def psf_base(g,s,delta):
     """Implement the PSF base function; g = gamma, s = sigma (scaled), 

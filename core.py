@@ -8,10 +8,8 @@ from scipy.optimize import fmin,fsolve,fmin_tnc,brentq
 from scipy.interpolate import interp1d
 from scipy.stats import chi2
 
-import bary
-import py_exposure_p8
-from importlib import reload
-reload(py_exposure_p8)
+from . import bary
+from . import  py_exposure_p8
 
 # MET bounds for 8-year data set used for FL8Y and 4FGL
 t0_8year = 239557007.6
