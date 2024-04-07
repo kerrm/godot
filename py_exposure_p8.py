@@ -217,14 +217,12 @@ def adjust_cosines2(TSTART,TSTOP,pcosines,acosines,zcosines,
         s = splrep(x0,zcosines[i0:i1],k=1)
         zvals[di0:di1] = BSpline(*s,extrapolate=True)(xmid)
 
-    print((avals<0).sum())
-    print((avals>1).sum())
-    print((pvals>1).sum())
     assert(not np.any(np.isnan(pvals)))
     assert(not np.any(np.isnan(avals)))
     assert(not np.any(np.isnan(zvals)))
-    avals[avals<0] = np.abs(avals[avals<0])
-    avals[avals>1] = 2-(avals[avals>1])
+    # Reflect any values that went over the bounds
+    avals[avals<-1] = -2-avals[avals<-1] # = -1+(-1-val) = -2-val
+    avals[avals>1] = 2-(avals[avals>1]) # = 1-(val-1) = 2-val
     pvals[pvals>1] = 2-(pvals[pvals>1])
     zvals[zvals>1] = 2-(zvals[zvals>1])
     dbug['pcos1'] = pvals.copy()
@@ -395,7 +393,10 @@ class Livetime(object):
         keyword_options.process(self,kwargs)
         self.prev_vals = self.prev_ra = self.prev_dec = None # initialize caching
         self.fields    = ['START','STOP','LIVETIME','RA_SCZ','DEC_SCZ',
-                            'RA_ZENITH','DEC_ZENITH','RA_SCX','DEC_SCX']
+                           'RA_ZENITH','DEC_ZENITH','RA_SCX','DEC_SCX',
+                           # TMP?
+                           'LAT_GEO','LON_GEO','B_MCILWAIN','L_MCILWAIN',
+                           'GEOMAG_LAT','LAMBDA']
         self._setup_gti(ft1files)
         self._setup_ft2(ft2files)
         self._update_gti()
@@ -613,6 +614,30 @@ class Livetime(object):
         for field in self.fields:
             self.__dict__[field] = self.__dict__[field][mask]
 
+    def _get_cartesian_basis(self):
+        """ Return arrays giving the unit vectors in celestial coords of
+        the SC X,Y, and Z axes.
+
+        Returns
+        -------
+        [SCX,SCY,SCZ] : arrays for S/C X,Y,Z axes.  SCX has dim (3, N),
+            viz its entries are the x,y,z coordinates for each time entry.
+        """
+        Zz = self.SIN_DEC_SCZ
+        Xz = np.cos(self.RA_SCZ)*self.COS_DEC_SCZ
+        Yz = np.sin(self.RA_SCZ)*self.COS_DEC_SCZ
+        SCZ = np.asarray([Xz,Yz,Zz])
+
+        cx,sx = self.COS_DEC_SCX,self.SIN_DEC_SCX
+        Zx = self.SIN_DEC_SCX
+        Xx = np.cos(self.RA_SCX)*self.COS_DEC_SCX
+        Yx = np.sin(self.RA_SCX)*self.COS_DEC_SCX
+        SCX = np.asarray([Xx,Yx,Zx])
+
+        SCY = np.cross(SCZ,SCX,axis=0)
+
+        return SCX,SCY,SCZ
+
     def get_cosines(self,ra,dec,theta_cut,zenith_cut,get_phi=False,
             apply_correction=False,oversample=False):
         """ Return the cosine of the arclength between the specified 
@@ -642,8 +667,20 @@ class Livetime(object):
         # all of these calculations basically determine the dot product
         # between the source position and the vector of interest, viz. the
         # S/C Z- and X-axes, and the zenith direction.
-        ra_s,ra_z = self.RA_SCZ,self.RA_ZENITH
         cdec,sdec = np.cos(dec),np.sin(dec)
+
+        """
+        # TMP?
+        SCX,SCY,SCZ = self._get_cartesian_basis()
+        Zsrc = sdec
+        Xsrc = np.cos(ra)*cdec
+        Ysrc = np.sin(ra)*cdec
+        SRC = np.asarray([Xsrc,Ysrc,Zsrc])
+        srcX = SRC@SCX
+        srcY = SRC@SCY
+        phi = np.arctan2(srcY,srcX)
+        # end TMP?
+        """
 
         # cosine(polar angle) of source in S/C system
         pcosines  = self.COS_DEC_SCZ*cdec*np.cos(ra-self.RA_SCZ) + self.SIN_DEC_SCZ*sdec
@@ -660,13 +697,25 @@ class Livetime(object):
         LT = self.LIVETIME[mask]
 
         if get_phi:
-            ra_s = self.RA_SCX
             acosines = self.COS_DEC_SCX[mask]*cdec*np.cos(ra-self.RA_SCX[mask]) + self.SIN_DEC_SCX[mask]*sdec
-            # the (1-pcosine^2)**0.5 normalizes the vector to the X/Y plane,
-            # so that the remaining portion is just the source vector
-            # projected onto the x axis; and the abs/clip folds to 0 to pi/2
-            # to enforce the four-fold symmetry
-            np.clip(np.abs(acosines/(1-pcosines**2)**0.5),0,1,out=acosines)
+            # acosines is the projection onto X and pcosines is same onto Z
+            # So the amplitude of the Y projection is
+            # (1-acosines**2-pcosines**2)**0.5.
+            # Thus, phi (the angle as measured in the X/Y plane) will be
+            # given by atan2(Y,X) = 
+            #          atan2((1-acosines**2-pcosines**2)**0.5,acosines)
+            # If we don't care about the quadrant, then this can also be
+            # managed as
+            # cos(phi) = x / (x^2+y^2) = x / (1-z^2), or
+            # cos(phi) = acosines / (1-pcosines**2)**0.5
+
+            # While it's nice to have the angle directly, for interp., we
+            # need to unwrap it.  Thus I prefer to keep it as cos(phi), and
+            # I've changed it from the previous implementation which only
+            # used one quadrant.  Two quadrants smooths out the time
+            # variation and should improve interpolation.
+            acosines = np.clip(
+                    acosines / (1-pcosines**2)**0.5,-1,1,out=acosines)
         else:
             acosines = None
 
@@ -830,7 +879,7 @@ class EfficiencyCorrection(object):
 
 class EffectiveArea(object):
 
-    def __init__(self,irf=DEFAULT_IRF,CALDB=None,use_phidep=False):
+    def __init__(self,irf=DEFAULT_IRF,CALDB=None):
         """ Encapsulate reading the Fermi-LAT effective area.
 
         Parameters
@@ -880,14 +929,18 @@ class EffectiveArea(object):
             hdu.close()
 
     def _phi_mod(self,e,c,phi,event_type):
-        # assume phi has already been reduced to range 0 to pi/2
         if phi is None:
             return 1.
+        # wrap phi such that 0 to 45 corresponds to 0 to 1
+        # We don't know what range it will have first, but the following
+        # should work for any range (0 to pi/4, 0 to pi/2, 0 to 2pi...)
+        x = 2*np.abs( (phi%(np.pi*0.5))*(2./np.pi) -0.5)
+        assert(x.min()>=0)
+        assert(x.max()<=1)
         par0 = self._p0tabs[event_type](e,c,bilinear=False)
         par1 = self._p1tabs[event_type](e,c,bilinear=False)
         norm = 1. + par0/(1. + par1)
-        phi = 2*abs((2./np.pi)*phi - 0.5)
-        return (1. + par0*phi**par1)/norm
+        return (1. + par0*x**par1)/norm
 
     def __call__(self,e,ctheta,event_type,phi=None,bilinear=True):
         """ Return bilinear (or nearest-neighbour) interpolation.
@@ -1066,26 +1119,26 @@ def test_psf_correction():
     assert(np.all(pc(100,'FRONT',1) > ftest))
     assert(np.all(pc(100,'BACK',1) > btest))
 
-def aeff_corr(pcos,acos):
+def aeff_corr(pcos,acos,npz_fname='/tmp/test.npz'):
     """ Need to apply a 2D correction."""
-    rvals = np.ones_like(pcos)
-    corrections = [
-           [[0.00,0.25],[[0.35,0.7,0.99],[0.88,0.91,1.025],[0.96,0.99,0.989]]],
-           [[0.25,0.50],[[0.85,0.89,1.013],[0.89,0.93,0.99],[0.99,1.00,1.03]]],
-           [[0.50,0.75],[[0.35,0.57,0.975],[0.74,0.85,1.015],[0.86,0.91,0.985],[0.99,1.00,1.05]]],
-           [[0.75,1.00],[[0.99,1.00,1.025]]]]
-    for c in corrections:
-        abounds,pcorrs = c
-        amask = (acos >= abounds[0]) & (acos < abounds[1])
-        idx = np.flatnonzero(amask)
-        masked_pcos = pcos[amask]
-        for pcorr in pcorrs:
-            pmask = (masked_pcos >= pcorr[0]) & (masked_pcos < pcorr[1])
-            rvals[idx[pmask]] = pcorr[2]
 
-    # Now apply a phi correction for a range of polar angle
-    mask = (pcos >= 0.6) & (pcos < 0.8) & (acos < 0.1)
-    rvals[mask] *= 1.025
+    # Load in a saved interpolator
+    with np.load(npz_fname) as npz_file:
+        pcens = npz_file['pcens'].copy()
+        acens = npz_file['acens'].copy()
+        zvals = npz_file['z'].copy()
+    from scipy.interpolate import RegularGridInterpolator
+    rg = RegularGridInterpolator([pcens,acens],zvals,
+            bounds_error=False,fill_value=None,method='linear')
 
-    return rvals
+    # convert phi cosines to wrapped phi coordinate
+    phi = np.arccos(acos)
+    wrapped_phi = 2*np.abs( (phi%(np.pi*0.5))*(2./np.pi) -0.5)
+
+    # Evaluate the aeff correction.  The saved values are obs/exp-1.
+    # Convert that to a multiplier _for the exposure_.
+    arg = np.asarray([pcos,wrapped_phi]).T
+    delta = rg(arg)+1
+
+    return delta
 

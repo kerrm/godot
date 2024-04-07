@@ -11,6 +11,9 @@ from scipy.stats import chi2
 from . import bary
 from . import  py_exposure_p8
 
+from importlib import reload
+reload(py_exposure_p8)
+
 # MET bounds for 8-year data set used for FL8Y and 4FGL
 t0_8year = 239557007.6
 t1_8year = 491999980.6
@@ -23,6 +26,34 @@ def mjd2met(times,mjdref=51910+7.428703703703703e-4):
     times = (np.asarray(times,dtype=np.float128)-mjdref)*86400
     return times
 
+def parse_dss(hdulist):
+    """ Return some information about the data cuts in an FT1 file using
+    the DSS keywords.
+
+    Specifically, the relevant max radius, energy, and zenith angle cuts.
+
+    Returns
+    -------
+    (ra,dec,maxrad), (emin,emax), (zmax)
+    """
+    rcuts = None
+    ecuts = None
+    zmax = None
+    h = hdulist[1]._header
+    ndss = len([x for x in h.keys() if x.startswith('DSTYP')])
+    for idss in range(1,ndss+1):
+        dstyp = h[f'DSTYP{idss}'].strip()
+        dsval = h[f'DSVAL{idss}'].strip()
+        if dsval.startswith('CIRCLE'):
+            rcuts = [float(x) for x in dsval[8:-1].split(',')]
+            continue
+        if dstyp == 'ZENITH_ANGLE':
+            zmax = float(dsval.split(':')[-1])
+            continue
+        if dstyp == 'ENERGY':
+            ecuts = [float(x) for x in dsval.split(':')]
+            continue
+    return rcuts,ecuts,zmax
 
 class Cell(object):
     """ Encapsulate the concept of a Cell, specifically a start/stop
@@ -1265,6 +1296,9 @@ class Data(object):
         ra : R.A. of source (deg)
         dec : Decl. of source (deg)
         weight_cut : fraction of source photons to retain
+        zenith_cut : maximum zenith angle for data/exposure calc. (deg)
+        minimum_exposure : TODO
+        use_phi : use phi-dependence in effective area calculation
         max_radius : maximum photon separation from source [deg]
         bary_ft1files : an optional mirrored set of FT1 files with
             photon timestamps in the barycentric reference frame
@@ -1303,14 +1337,28 @@ class Data(object):
         
         lt = py_exposure_p8.Livetime(ft2files,ft1files,
                 tstart=tstart,tstop=tstop,verbose=verbosity)
+
+        # Get DSS information from first FT1 file; the others will be
+        # checked for consistency in _load_photons
+        rcuts,ecuts,zmax = parse_dss(fits.open(ft1files[0]))
+        emin,emax = ecuts # in MeV
+
         # TMP
         #self._lt = lt
         # end TMP
-        _,pcosines,acosines,START,STOP,LIVETIME = lt.get_cosines(
+        lt_mask,pcosines,acosines,START,STOP,LIVETIME = lt.get_cosines(
                 np.radians(ra),np.radians(dec),
                 theta_cut=theta_cut,
                 zenith_cut=np.cos(np.radians(zenith_cut)),
-                get_phi=use_phi,apply_correction=correct_cosines)
+                get_phi=True,apply_correction=correct_cosines)
+        # TMP?
+        lat_geo = lt.LAT_GEO[lt_mask]
+        lon_geo = lt.LON_GEO[lt_mask]
+        mcl = lt.L_MCILWAIN[lt_mask]
+        mcb = lt.B_MCILWAIN[lt_mask]
+        glat1 = lt.GEOMAG_LAT[lt_mask]
+        glat2 = lt.LAMBDA[lt_mask]
+        # end TMP?
         phi = np.arccos(acosines) if use_phi else None
         if use_weights_for_exposure:
             base_spectrum = None
@@ -1320,8 +1368,10 @@ class Data(object):
         else:
             ltfrac = None
         aeff,texp_edom,texp = self._get_weighted_aeff(
-                pcosines,phi,base_spectrum=base_spectrum,ltfrac=ltfrac,
-                correct_psf=correct_psf,use_psf_types=use_psf_types)
+                pcosines,phi,
+                base_spectrum=base_spectrum,ltfrac=ltfrac,
+                correct_psf=correct_psf,use_psf_types=use_psf_types,
+                emin=emin,emax=emax)
         self.total_exposure_edom = texp_edom
         self.total_exposure = texp
         exposure = aeff*LIVETIME
@@ -1354,10 +1404,19 @@ class Data(object):
         self._pcosines = pcosines[minexp_mask]
         self._acosines = acosines[minexp_mask]
         ## end TMP?
+        # TMP?
+        self._lat_geo = lat_geo[minexp_mask]
+        self._lon_geo = lon_geo[minexp_mask]
+        self._mcl = mcl[minexp_mask]
+        self._mcb = mcb[minexp_mask]
+        self._glat1 = glat1[minexp_mask]
+        self._glat2 = glat2[minexp_mask]
+        self._ltfrac = ltfrac[minexp_mask]
+        # end TMP
 
-        data,self.timeref,photon_idx = self._load_photons(
+        data,self.timeref,photon_idx,ecuts = self._load_photons(
                 ft1files,weight_col,self.TSTART[0],self.TSTOP[-1],
-                max_radius=max_radius)
+                max_radius=max_radius,zenith_cut=zenith_cut)
         ti = data[0]
         if self.timeref=='SOLARSYSTEM':
             print('WARNING!!!!  Barycentric data not accurately treated')
@@ -1378,8 +1437,10 @@ class Data(object):
         self.other_data = data[2:]
 
         if bary_ft1files is not None:
-            data,timeref = self._load_photons(bary_ft1files,weight_col,
-                    None,None,max_radius=max_radius,no_filter=True)
+            data,timeref,photon_idx,ecuts = self._load_photons(
+                    bary_ft1files,weight_col,
+                    None,None,max_radius=max_radius,no_filter=True,
+                    zenith_cut=zenith_cut)
             self.bary_ti = (data[0][photon_idx][event_mask]).copy()
         else:
             self.bary_ti = None
@@ -1430,9 +1491,11 @@ class Data(object):
 
     def _get_weighted_aeff(self,pcosines,phi,base_spectrum=None,
             use_event_weights=False,livetime=None,ltfrac=None,
-            correct_psf=True,use_psf_types=False):
+            correct_psf=True,use_psf_types=False,emin=100,emax=1e5):
 
-        ea = py_exposure_p8.EffectiveArea(use_phidep=phi is not None)
+        emin = np.log10(emin)
+        emax = np.log10(emax)
+        ea = py_exposure_p8.EffectiveArea()
         if correct_psf:
             pc = py_exposure_p8.PSFCorrection()
         else:
@@ -1448,7 +1511,7 @@ class Data(object):
             event_types = ['FRONT','BACK']
 
         if base_spectrum is not None:
-            edom = np.logspace(2,5,25)
+            edom = np.logspace(emin,emax,25)
             wts = base_spectrum(edom)
             # this is the exposure as a function of energy
             total_exposure = np.empty_like(edom)
@@ -1476,7 +1539,7 @@ class Data(object):
                 en = self.other_data[self.other_data_cols.index('energy')]
             except ValueError:
                 return self._get_weighted_aeff(pcosines,phi,base_spectrum=base_spectrum,use_event_weights=False,ltfrac=ltfrac)
-            edom = np.logspace(2,5,25)
+            edom = np.logspace(emin,emax,25)
             wcts = np.histogram(en,weights=self.we,bins=edom)[0]
             ledom = np.log10(edom)
             edom = 10**(0.5*(ledom[:-1]+ledom[1:]))
@@ -1501,35 +1564,62 @@ class Data(object):
         return aeff,edom,total_exposure
 
     def _load_photons(self,ft1files,weight_col,tstart,tstop,
-            max_radius=None,time_col='time',no_filter=False):
+            max_radius=None,time_col='time',no_filter=False,
+            zenith_cut=100):
         cols = [time_col,weight_col,'energy']
         deques = [deque() for col in cols]
+        all_ecuts = None
+        all_rcuts = None
         for ift1,ft1 in enumerate(ft1files):
             f = fits.open(ft1)
-            if ift1 == 0:
-                timeref = f['events'].header['timeref']
+            rcuts,ecuts,zmax = parse_dss(f)
+
+            if all_ecuts is None:
+                all_ecuts = ecuts
             else:
-                if f['events'].header['timeref'] != timeref:
+                if not (all_ecuts[0]==ecuts[0] and all_ecuts[1]==ecuts[1]):
+                    raise ValueError('Data energy cuts were not consistent.')
+            if all_rcuts is None:
+                all_rcuts = rcuts
+            else:
+                if not (all_rcuts[0]==rcuts[0] and all_rcuts[1]==rcuts[1]):
+                    raise ValueError('Data radius cuts were not consistent.')
+
+            hdu = f['events']
+            if zmax < zenith_cut:
+                raise ValueError(f'zenith_cut argument {zenith_cut} < {zmax} (data)')
+            if ift1 == 0:
+                timeref = hdu.header['timeref']
+            else:
+                if hdu.header['timeref'] != timeref:
                     raise Exception('Different time systems!')
             # sanity check for weights computation
             try:
-                f['events'].data.field(weight_col)
+                hdu.data.field(weight_col)
             except KeyError:
                 print(f'FT1 file {ft1} did not have weights column {weight_col}!  Skipping.')
                 continue
+
+            mask = np.full(len(hdu.data['energy']),True,dtype=bool)
+
             if max_radius is not None:
-                ra = np.radians(f['events'].data.field('ra'))
-                dec = np.radians(f['events'].data.field('dec'))
+                ra = np.radians(hdu.data['ra'])
+                dec = np.radians(hdu.data['dec'])
                 cdec,sdec = np.cos(dec),np.sin(dec)
                 cdec_src = np.cos(np.radians(self.dec))
                 sdec_src = np.sin(np.radians(self.dec))
-        # cosine(polar angle) of source in S/C system
+                # cosine(polar angle) of source in S/C system
                 cosines  = cdec_src*np.cos(dec)*np.cos(ra-np.radians(self.ra)) + sdec_src*np.sin(dec)
-                mask = cosines >= np.cos(np.radians(max_radius))
+                mask &= (cosines >= np.cos(np.radians(max_radius)))
                 if (self._verbosity >= 2):
                     print('keeping %d/%d photons for radius cut'%(mask.sum(),len(mask)))
-            else:
-                mask = slice(0,f['events'].header['naxis2'])
+
+            if zenith_cut < zmax:
+                zmask = hdu.data['zenith_angle'] <= zenith_cut
+                if (self._verbosity >= 2):
+                    print('keeping %d/%d photons for zenith cut'%(zmask.sum(),len(zmask)))
+                mask &= zmask
+
             for c,d in zip(cols,deques):
                 d.append(f[1].data.field(c)[mask])
 
@@ -1552,7 +1642,7 @@ class Data(object):
             idx = a
         data = [(np.concatenate(d)[idx]).copy() for d in deques]
         self.other_data_cols = cols[2:]
-        return data,timeref,idx
+        return data,timeref,idx,ecuts
 
     def _bary2topo(self,bary_times,quiet=True):
         if self._barycon is not None:
@@ -2081,6 +2171,7 @@ class PhaseData(Data):
             weight_cut -- fraction of source photons to retain
             max_radius -- maximum photon separation from source [deg]
         """
+        print('WARNING! This class is probably out of date.')
         self.ft1files = ft1files
         self.ra = ra
         self.dec = dec
