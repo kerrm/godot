@@ -2568,6 +2568,47 @@ def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
         return freqs[:(l//4+1)],dlogl_nobg
     return freqs[:(l//4+1)],dlogl_nobg,dlogl-dlogl_null,dlogl_null
 
+def power_spectrum_simple(timeseries,get_amps=False):
+    """ Follow a similar approach to power_spectrum fft (see docstring)
+    but save time by only evaluating the background-fixed quantity.
+
+    Parameters
+    ----------
+    get_amps : return the cos/sin amplitudes that maximize the likelihood
+
+    Returns
+    -------
+    freqs,dlogls,[amps] : the frequencies (in Hz), the change in log like
+        for the best-fitting amplitude, and if get_amps=True, the
+        amplitudes
+    """
+
+    W = timeseries.weights
+    WW = timeseries.weights2
+    S = timeseries.sexp
+
+    l = len(W)
+
+    # now use FFT to evaluate the various cosine moments, for the
+    # maximum likelihood estimators
+    f = np.fft.rfft(W-S)[:(l//4+1)]
+    WmS_cos = np.real(f)
+    WmS_sin = -np.imag(f)
+
+    f = np.fft.rfft(WW)
+    S2 = f[0].real
+    WW_cos  = 0.5*(S2+np.real(f)[::2])
+    WW_sin  = 0.5*(S2-np.real(f)[::2])
+
+    # Eliminate 0 entries to avoid error messages
+    WW_sin[0] = 1.
+
+    dlogl = WmS_cos**2/WW_cos + WmS_sin**2/WW_sin
+    freqs = np.fft.rfftfreq(l)[:(l//4+1)]*(1./timeseries.tsamp())
+    if get_amps:
+        return freqs,dlogl,(WmS_cos,WmS_sin,WW_cos,WW_sin)
+    return freqs,dlogl
+
 def bb_prior_tune(data,tcell,bb_priors=[2,3,4,5,6,7,8,9,10],ntrial=10,
         orbital=False,**cell_kwargs):
     """ Test a range of parameters for an exponential BB prior.
