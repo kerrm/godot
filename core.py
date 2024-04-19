@@ -1582,8 +1582,16 @@ class Data(object):
             if all_rcuts is None:
                 all_rcuts = rcuts
             else:
-                if not (all_rcuts[0]==rcuts[0] and all_rcuts[1]==rcuts[1]):
-                    raise ValueError('Data radius cuts were not consistent.')
+                tol = 1e-4 # deg
+                ra0,de0,rad0 = all_rcuts
+                ra1,de1,rad1 = rcuts
+                if not (abs(ra0-ra1) < tol):
+                    raise ValueError('Data RA values are not consistent: {ra0:.5f} != {ra1:.5f}')
+                if not (abs(de0-de1) < tol):
+                    raise ValueError('Data Dec values are not consistent: {de0:.5f} != {de1:.5f}')
+                if not (abs(rad0-rad1) < tol):
+                    raise ValueError('Data aperture radius values are not consistent: {rad0:.5f} != {rad1:.5f}')
+
 
             hdu = f['events']
             if zmax < zenith_cut:
