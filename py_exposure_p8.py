@@ -208,6 +208,12 @@ def adjust_cosines2(TSTART,TSTOP,pcosines,acosines,zcosines,
         x0 = TSTART[i0:i1]
         xmid = tmid[di0:di1]
 
+        if len(x0) == 1: # special case, can't interpolate
+            pvals[di0:di1] = pcosines[i0:i1]
+            avals[di0:di1] = acosines[i0:i1]
+            zvals[di0:di1] = zcosines[i0:i1]
+            continue
+
         s = splrep(x0,pcosines[i0:i1],k=1)
         pvals[di0:di1] = BSpline(*s,extrapolate=True)(xmid)
 
@@ -696,6 +702,9 @@ class Livetime(object):
         T1 = self.STOP[mask]
         LT = self.LIVETIME[mask]
 
+        np.clip(pcosines,-1,1,out=pcosines)
+        np.clip(zcosines,-1,1,out=zcosines)
+
         if get_phi:
             acosines = self.COS_DEC_SCX[mask]*cdec*np.cos(ra-self.RA_SCX[mask]) + self.SIN_DEC_SCX[mask]*sdec
             # acosines is the projection onto X and pcosines is same onto Z
@@ -714,8 +723,14 @@ class Livetime(object):
             # I've changed it from the previous implementation which only
             # used one quadrant.  Two quadrants smooths out the time
             # variation and should improve interpolation.
-            acosines = np.clip(
-                    acosines / (1-pcosines**2)**0.5,-1,1,out=acosines)
+            
+            # Finally, avoid a divide by zero with this klugey bit
+            # NB do NOT use clip with a mask, it does something wrong
+            denominator = 1-pcosines**2
+            pmask = denominator > 1e-14
+            acosines[~pmask] = 1.
+            acosines[pmask] = acosines[pmask] * denominator[pmask]**-0.5
+            np.clip(acosines,-1,1,out=acosines)
         else:
             acosines = None
 
@@ -1119,7 +1134,7 @@ def test_psf_correction():
     assert(np.all(pc(100,'FRONT',1) > ftest))
     assert(np.all(pc(100,'BACK',1) > btest))
 
-def aeff_corr(pcos,acos,npz_fname='/tmp/test.npz'):
+def aeff_corr(pcos,acos,npz_fname='vela_aeff_corr.npz'):
     """ Need to apply a 2D correction."""
 
     # Load in a saved interpolator
@@ -1138,7 +1153,7 @@ def aeff_corr(pcos,acos,npz_fname='/tmp/test.npz'):
     # Evaluate the aeff correction.  The saved values are obs/exp-1.
     # Convert that to a multiplier _for the exposure_.
     arg = np.asarray([pcos,wrapped_phi]).T
-    delta = rg(arg)+1
+    delta = rg(arg) + 1
 
     return delta
 

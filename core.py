@@ -9,10 +9,12 @@ from scipy.interpolate import interp1d
 from scipy.stats import chi2
 
 from . import bary
-from . import  py_exposure_p8
+from . import py_exposure_p8
 
 from importlib import reload
 reload(py_exposure_p8)
+
+dbug = dict()
 
 # MET bounds for 8-year data set used for FL8Y and 4FGL
 t0_8year = 239557007.6
@@ -25,6 +27,11 @@ def met2mjd(times,mjdref=51910+7.428703703703703e-4):
 def mjd2met(times,mjdref=51910+7.428703703703703e-4):
     times = (np.asarray(times,dtype=np.float128)-mjdref)*86400
     return times
+
+def infer_met(time):
+    if time < 100000:
+        return mjd2met(time)
+    return time
 
 def parse_dss(hdulist):
     """ Return some information about the data cuts in an FT1 file using
@@ -67,6 +74,11 @@ class Cell(object):
         self.ti = np.atleast_1d(photon_times)
         self.we = np.atleast_1d(photon_weights)
         self.SonB = source_to_background_ratio
+        # TMP? Try baking in a set of scales to allow re-scaling of a
+        # baseline set of weights.  Ultimately we need this at the data
+        # level too...
+        self._alpha = 1
+        self._beta = 1
 
     def sanity_check(self):
         if self.exp==0:
@@ -133,7 +145,9 @@ class CellTimeSeries(object):
         ## exposure mask
         self.minimum_exposure = minimum_exposure
         mask = ~(exp > minimum_exposure)
-        #print('exposure filter %d/%d:'%(mask.sum(),len(mask)))
+        self._zero_weight(mask)
+
+    def _zero_weight(self,mask):
         self.exp[mask] = 0
         self.sexp[mask] = 0
         self.bexp[mask] = 0
@@ -170,21 +184,42 @@ class CellTimeSeries(object):
         else:
             return self.starts,self.stops
 
+    def zero_weight(self,tstart,tstop):
+        """ Zero out data between tstart and tstop.
+
+        Parameters
+        ----------
+        tstart : beginning of zero interval (MET, but will infer from MJD)
+        ttop : end of zero interval (MET, but will infer from MJD)
+        """
+        tstart = infer_met(tstart)
+        tstop = infer_met(tstop)
+        mask = (self.starts >= tstart) & (self.stops <= tstop)
+        self._zero_weight(mask)
 
 class CellLogLikelihood(object):
 
-    def __init__(self,cell):
+    def __init__(self,cell,reverse=False,maxweight=1-1e-9):
         self.cell = cell
         self.ti = cell.ti
-        self.we = cell.we
+        #self.we = cell.we.astype(np.float64)
+        a,b,w = cell._alpha,cell._beta,cell.we.astype(np.float64)
+        self.we = w*a / (w*a + b*(1-w))
         self.iwe = 1-self.we
-        self.S = cell.exp
-        self.B = self.S/cell.SonB
+        self.S = cell.exp*cell._alpha
+        self.B = cell.exp/cell.SonB*cell._beta
+        if reverse:
+            self.we,self.iwe = self.iwe,self.we
+            self.S,self.B = self.B,self.S
         self._tmp1 = np.empty_like(self.we)
         self._tmp2 = np.empty_like(self.we)
         self._last_beta = 0.
 
     def log_likelihood(self,alpha):
+        """ Return the (positive) log likelihood for a flux multiplier
+            alpha.  Viz, the flux in this cell is alpha*F_mean, so the
+            null hypothesis is alpha=1.
+        """
         # NB the minimum defined alpha is between -1 and 0 according to
         # amin = (wmax-1)/wmax
         t1,t2 = self._tmp1,self._tmp2
@@ -269,11 +304,16 @@ class CellLogLikelihood(object):
 
     def fmin_tnc_func(self,p):
         alpha,beta = p
-        alpha -= 1
-        beta -= 1
+        alpha = p[0] - 1
+        beta = p[1] -1
+        if (alpha==-1) and (beta==-1):
+            # would call log(0)
+            return np.inf,[np.inf,np.inf]
         S,B = self.S,self.B
         t1 = np.multiply(self.we,alpha-beta,out=self._tmp1)
         t1 += 1+beta
+        if np.any(t1 <= 0):
+            print(alpha,beta,self.we[t1 <= 0])
         # above equivalent to
         # t1[:] = 1+beta*iw+alpha*self.we
         t2 = np.log(t1,out=self._tmp2)
@@ -376,42 +416,83 @@ class CellLogLikelihood(object):
         """
         if profile_background:
 
-            # I'm not sure if it's best to keep to a default guess or to
-            # try it at the non-profile best-fit.
-            #if guess == 1:
-                #guess = self.get_max(profile_background=False)
-            #if beta == 1:
-                #beta = self.get_beta_max(guess)
-            # NB -- removed the scale below as it seemed to work better
-            # without it.  In other words, the scale is already ~1!
-            # test TNC method
-            rvals,nfeval,rc = fmin_tnc(self.fmin_tnc_func,[guess,beta],
-                    bounds=[[0,None],[0,None]],disp=0,ftol=1e-3)
-            # this is one possible way to check for inconsistency in max
-            #if (guess == 1) and (rvals[0] > 10):
-                #rvals,nfeval,rc = fmin_tnc(self.fmin_tnc_func,
-                        #[rvals[0],beta],
-                        #bounds=[[0,None],[0,None]],disp=0,ftol=1e-3)
+            rvals,nfeval,rc = fmin_tnc(self.fmin_tnc_func,
+                    [float(guess),float(beta)],
+                    bounds=[[0,None],[0,None]],disp=0,ftol=1e-3,
+                    maxfun=200)
 
             if not((rc < 0) or (rc > 2)):
                 if (guess == 0) and (rvals[0] > 5e-2):
                     print('Warning, possible inconsistency.  Guess was 0, best fit value %.5g.'%(rvals[0]),'beta=',beta)
                 return rvals
 
-            # try a small grid to seed a search
-            grid = np.asarray([0,0.1,0.3,0.5,1.0,2.0,5.0,10.0])
-            cogrid = np.asarray([self.log_profile_likelihood(x) for x in grid])
-            newguess = grid[np.argmax(cogrid)]
-            newbeta = max(0.1,self.get_beta_max(newguess))
+            # just do a second iteration to try see if it converges
+            guess = rvals[0]
+            beta = rvals[1]
+            guess += 1e-3 # just perturb these a bit
+            beta -= 1e-3
+
+            rvals,nfeval,rc = fmin_tnc(self.fmin_tnc_func,
+                    [guess,beta],
+                    bounds=[[0,None],[0,None]],disp=0,ftol=1e-3,
+                    maxfun=200)
+
+            if not((rc < 0) or (rc > 2)):
+                if (guess == 0) and (rvals[0] > 5e-2):
+                    print('Warning, possible inconsistency.  Guess was 0, best fit value %.5g.'%(rvals[0]),'beta=',beta)
+                return rvals
+            
+            oldguess = guess
+            oldbeta = beta
+            oldrvals = rvals
+            oldlogl = self.fmin_tnc_func(rvals)[0]
+
+            if rc == 3: # exceeded maximum evaluations
+                newguess = oldguess
+                newbeta = oldbeta
+            else:
+                # try a small grid to seed a search
+                grid = np.asarray([0,0.1,0.3,0.5,1.0,1.5,2.0,5.0,10.0])
+                cogrid = np.asarray(
+                        [self.log_profile_likelihood(x) for x in grid])
+
+                idx_amax = np.argmax(cogrid)
+                idx_less = max(0,idx_amax-1)
+                idx_gret = min(idx_amax+1,len(grid)-1)
+                dlogl = abs(cogrid[idx_gret]-cogrid[idx_less])
+                if dlogl > 100:
+                    # make a finer grid
+                    grid = np.linspace(grid[idx_less],grid[idx_gret],20)
+                    cogrid = np.asarray(
+                            [self.log_profile_likelihood(x) for x in grid])
+
+                # need to cast these otherwise the TNC wrapper barfs on a
+                # type check...
+                newguess = float(grid[np.argmax(cogrid)])
+                newbeta = float(max(0.1,self.get_beta_max(newguess)))
 
             rvals,nfeval,rc = fmin_tnc(self.fmin_tnc_func,
                     [newguess,newbeta],
-                    bounds=[[0,None],[0,None]],disp=0,ftol=1e-3)
+                    bounds=[[0,None],[0,None]],disp=0,ftol=1e-3,
+                    maxfun=200)
+            newrvals = rvals
+            newlogl = self.fmin_tnc_func(rvals)[0]
+
             if not((rc < 0) or (rc > 2)):
-                return rvals
+                if newlogl > oldlogl:
+                    if newlogl > (oldlogl+2e-3):
+                        print(f'Warning! Converged but log likelihood decreased; rc={rc}.')
+                    return oldrvals
+                return newrvals
             else:
-                print('Warning, trouble locating maximum with profile_background!  Results for this interval may be unreliable.')
-            return rvals
+                # alpha = 0, but the log likelihoods agree, so don't emit
+                # a warning
+                if (rvals[0] == 0) and np.all((cogrid[1:]-cogrid[:-1]<0)):
+                    pass
+                else:
+                    print('Warning, never converged locating maximum with profile_background!  Results for this interval may be unreliable.')
+
+            return newrvals
 
         w = self.we
         iw = self.iwe
@@ -527,7 +608,10 @@ class CellLogLikelihood(object):
         """
         if np.isnan(alpha):
             return 1
-        #display = False
+        if len(self.we)==0:
+            return 0 # maximum likelihood estimator
+        if alpha == 0:
+            return len(self.we)/self.B # MLE
         alpha = alpha-1
         guess -= 1
         S,B = self.S,self.B
@@ -536,28 +620,20 @@ class CellLogLikelihood(object):
         t,t2 = self._tmp1,self._tmp2
 
         # check that the maximum isn't at 0 (-1) with derivative
-        t2[:] = 1+alpha*w
-        t[:] = iw/(t2-iw)
-        if (np.sum(t)-B) < 0:
+        t[:] = iw/w
+        if np.sum(t) < B*(1+alpha):
             return 0
         else:
             b = guess
-        #if display:
-        #    print '0:',b+1
 
         # on first iteration, don't let it go to 0
+        t2[:] = 1+alpha*w
         t[:] = iw/(t2+b*iw)
         f1 = np.sum(t)-B
         t *= t
         f2 = np.sum(t) # will include sign below
         b = b + f1/f2
-        #if display:
-        #    print '1:',b+1
         b = max(0.2-1,b)
-        #if b < 0.2-1:
-            #b = 0.2-1
-        #if display:
-        #    print '1p:',b+1
 
         # second iteration more relaxed
         t[:] = iw/(t2+b*iw)
@@ -565,13 +641,7 @@ class CellLogLikelihood(object):
         t *= t
         f2 = np.sum(t) # will include sign below
         b = b + f1/f2
-        #if display:
-        #    print '2:',b+1
         b = max(0.05-1,b)
-        #if b < 0.05-1:
-            #b = 0.05-1
-        #if display:
-        #    print '2p:',b+1
 
         # last NR iteration allow 0
         # second iteration more relaxed
@@ -580,13 +650,7 @@ class CellLogLikelihood(object):
         t *= t
         f2 = np.sum(t) # will include sign below
         b = b + f1/f2
-        #if display:
-        #    print '3:',b+1
-        #if b < 0-1:
-            #b = 0.02-1
         b = max(0.02-1,b)
-        #if display:
-        #    print '3p:',b+1
 
         # replace last NR iteration with a Halley iteration to handle
         # values close to 0 better; however, it can result in really
@@ -598,14 +662,10 @@ class CellLogLikelihood(object):
         t *= iw/(t2+b*iw)
         f3 = 2*np.sum(t)
         newb = max(0-1,b + 2*f1*f2/(2*f2*f2-f1*f3))
-        #if display:
-        #    print '4:',newb+1,b+1
         if abs(newb-b) > 10:
             blast = b = 2*b+1
         else:
             blast = b = newb
-        #if display:
-        #    print '4p:',b+1
 
         # now do a last Hally iteration
         t[:] = iw/(t2+b*iw)
@@ -615,8 +675,6 @@ class CellLogLikelihood(object):
         t *= iw/(t2+b*iw)
         f3 = 2*np.sum(t)
         b = max(0-1,b + 2*f1*f2/(2*f2*f2-f1*f3))
-        #if display:
-        #    print '5:',b+1
 
         # a quick check if we are converging slowly to try again or if
         # the final value is very large
@@ -660,9 +718,11 @@ class CellLogLikelihood(object):
         """ Evaluate the pdf over an adaptive range that includes the
             majority of the support.  Try to keep it to about 100 iters.
         """
+
         if profile_background:
             return self._get_logpdf_profile(aopt=aopt,dlogl=dlogl,npt=npt,
                     include_zero=include_zero)
+
         if aopt is None:
             aopt = self.get_max()
         we = self.we
@@ -670,6 +730,7 @@ class CellLogLikelihood(object):
         S,B = self.S,self.B
         t = self._tmp1
         amin = 0
+
         if aopt == 0:
             # find where logl has dropped, upper side
             llmax = np.log(iw).sum()
@@ -697,20 +758,26 @@ class CellLogLikelihood(object):
                 amax = amax - f0/f1
                 if abs(f0) < 0.1:
                     break
-        if not include_zero:
-            # ditto, lower side
+
+        if (not include_zero) and (aopt > 0):
+            # ditto, lower side; require aopt > 0 to avoid empty we
             t[:] = aopt*we + iw
             # use Taylor approximation to get initial guess
             f2 = np.abs(np.sum((we/t)**2))
-            amin = aopt - np.sqrt(2*dlogl/f2)
-            # do a few NR iterations
+            # calculate the minimum value of a which will keep the argument
+            # of the logarithm below positive, and enforce it, just to
+            # avoid numerical warnings -- 25 Apr 2024
+            min_a = np.max(1-1./we) + 1e-6
+            amin = max(min_a,aopt - np.sqrt(2*dlogl/f2))
+            # do a few Newton-Raphson iterations
             for i in range(5):
                 t[:] = amin*we+iw
                 f0 = np.log(t).sum()-amin*S+dlogl-llmax
                 f1 = np.sum(we/t)-S
-                amin = amin - f0/f1
+                amin = max(min_a,amin - f0/f1)
                 if abs(f0) < 0.1:
                     break
+
         amin = max(0,amin)
 
         dom = np.linspace(amin,amax,npt)
@@ -798,14 +865,19 @@ class CellLogLikelihood(object):
         dom,cod = self.get_pdf(aopt=aopt,
                 profile_background=profile_background)
         amax = np.argmax(cod)
-        func = self.log_profile_likelihood if profile_background else self.log_likelihood
-        if abs(dom[amax]-aopt) > 0.1: # somewhat ad hoc
-            # re-optimize
+        # Check for agreement between analytic and numerical maximum;
+        # if they are out, try both to get the max with a refined guess
+        # and evaluate the likelihood on a finer grid
+        if abs(dom[amax]-aopt) > 0.1:
             aopt = self.get_max(guess=dom[amax],
                     profile_background=profile_background)
             if profile_background:
                 aopt = aopt[0]
-            if abs(dom[amax]-aopt) > 0.1: # somewhat ad hoc
+            dom,cod = self.get_pdf(aopt=aopt,
+                    profile_background=profile_background,npt=200)
+            amax = np.argmax(cod)
+            # If they are still out, use the numerical value
+            if abs(dom[amax]-aopt) > 0.1:
                 print('failed to obtain agreement, using internal version')
                 aopt = dom[amax]
         ts = self.get_ts(aopt=aopt,profile_background=profile_background)
@@ -860,13 +932,14 @@ class CellsLogLikelihood(object):
         edges.  Still then have the problem of finding the maximum for
         irregular sampling.
     """
-    def __init__(self,cells,profile_background=False):
+    def __init__(self,cells,profile_background=False,reverse=False):
 
         # construct a sampled log likelihoods for each cell
-        self.clls = [CellLogLikelihood(x) for x in cells]
+        self.clls = [CellLogLikelihood(x,reverse=reverse) for x in cells]
         npt = 200
         self._cod = np.empty([len(cells),npt])
         self._dom = np.empty([len(cells),npt])
+        self._reverse = reverse
         self.cells = cells
 
         for icll,cll in enumerate(self.clls):
@@ -1036,6 +1109,23 @@ class CellsLogLikelihood(object):
         return aopt,ts,xconf
 
     def log_likelihood(self,alpha,slow_but_sure=False):
+        """ Return the (positive) log likelihood for each cell.
+
+        NB: the "fast" version of the log likelihood uses interpolators
+            of the log likelihood which are set to 0 at the maximum value
+            in each cell.  Therefore the returned values are relative to
+            the maximum possible likelihood.  On the other hand, the
+            "slow" version does not subtract off this maximum value.
+
+        Parameters
+        ----------
+        alpha : an array equal in length to the number of cells giving the
+            relative flux.  The sense is F(t) = alpha(t)*F_mean, viz. the
+            nominal value of alpha is 1.
+        slow_but_sure : if True, evaluate the log likelihood directly;
+            otherwise, use linear interpolation of the previously-cached
+            values
+        """
         if len(alpha) != len(self.clls):
             raise ValueError('Must provide a value of alpha for all cells!')
         if not hasattr(self,'_interpolators'):
@@ -1091,7 +1181,7 @@ class CellsLogLikelihood(object):
     def plot_cells_bb(self,tsmin=4,fignum=2,clear=True,color='C3',
             plot_raw_cells=True,bb_prior=4,plot_years=False,
             no_bb=False,no_ts=True,log_scale=False,
-            plot_phase=False,ax=None,labelsize='large'):
+            plot_phase=False,ax=None,labelsize='large',get_indices=False):
         """ Generate a plot showing fluxes both from the raw cells and from
             a Bayesian blocks partition which is computed using the input
             prior.
@@ -1154,7 +1244,12 @@ class CellsLogLikelihood(object):
             ax.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,
                     marker=None,color='C0',alpha=0.2,ls=' ',ms=3)
             t = rvals[~ul_mask].transpose()
-            ax.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',
+            # if the user has selected a very small tsmin, it is possible
+            # that aopt will be to the "left" of the confidence interval,
+            # giving a negative error, which will make matplotlib unhappy
+            loerr = t[3]
+            loerr[loerr < 0] = t[2][loerr < 0]
+            ax.errorbar(t[0],t[2],xerr=t[1],yerr=[loerr,t[4]],marker='o',
                     color='C0',alpha=0.2,ls=' ',ms=3)
         else:
             rvals = None
@@ -1162,13 +1257,15 @@ class CellsLogLikelihood(object):
         # now, do same for Bayesian blocks
         if not no_bb:
             bb_idx,bb_ts,var_ts,var_dof,fitness = self.do_bb(prior=bb_prior)
-            print(var_ts,var_dof)
-            print('Variability significance: ',chi2.sf(var_ts,var_dof))
+            if var_dof == 0:
+                print('No segments, no variability!')
+            else:
+                print('Variability significance: ',chi2.sf(var_ts,var_dof))
             bb_idx = np.append(bb_idx,len(self.cells))
             rvals_bb = np.empty([len(bb_idx)-1,5 if no_ts else 6])
             for ibb,(start,stop) in enumerate(zip(bb_idx[:-1],bb_idx[1:])):
                 cells = cell_from_cells(self.cells[start:stop])
-                cll = CellLogLikelihood(cells)
+                cll = CellLogLikelihood(cells,reverse=self._reverse)
                 if cll.S==0:
                     rvals_bb[ibb] = np.nan
                     continue
@@ -1199,7 +1296,11 @@ class CellsLogLikelihood(object):
             ax.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,
                     color='C3',alpha=0.8,ls=' ',ms=3)
             t = rvals_bb[~ul_mask].transpose()
-            ax.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',color='C3',
+            # In principle a reasonable TSmin cut will keep the yerrors
+            # from becoming negative, but enforce positive anyway
+            yloerr = t[3].copy()
+            yloerr[yloerr < 0] = t[2][yloerr < 0]
+            ax.errorbar(t[0],t[2],xerr=t[1],yerr=[yloerr,t[4]],marker='o',color='C3',
                     alpha=0.8,ls=' ',ms=3)
         else:
             rvals_bb=None
@@ -1212,10 +1313,12 @@ class CellsLogLikelihood(object):
         else:
             ax.set_xlabel('MJD',size=labelsize)
         ax.set_ylabel('Relative Flux Density',size=labelsize)
+        if get_indices:
+            return rvals,rvals_bb,bb_idx
         return rvals,rvals_bb
 
     def get_bb_lightcurve(self,tsmin=4,plot_years=False,plot_phase=False,
-            bb_prior=8):
+            bb_prior=8,get_indices=False):
         """ Return a flux density light curve for the raw cells.
         """
 
@@ -1223,13 +1326,12 @@ class CellsLogLikelihood(object):
 
         # now, do same for Bayesian blocks
         bb_idx,bb_ts,var_ts,var_dof,fitness = self.do_bb(prior=bb_prior)
-        print(var_ts,var_dof)
         print('Variability significance: ',chi2.sf(var_ts,var_dof))
         bb_idx = np.append(bb_idx,len(self.cells))
         rvals_bb = np.empty([len(bb_idx)-1,5])
         for ibb,(start,stop) in enumerate(zip(bb_idx[:-1],bb_idx[1:])):
             cells = cell_from_cells(self.cells[start:stop])
-            cll = CellLogLikelihood(cells)
+            cll = CellLogLikelihood(cells,reverse=self._reverse)
             if cll.S==0:
                 rvals_bb[ibb] = np.nan
                 continue
@@ -1249,6 +1351,8 @@ class CellsLogLikelihood(object):
             else:
                 rvals_bb[ibb] = tmid,terr,aopt,aopt-xconf[0],xconf[1]-aopt
 
+        if get_indices:
+            return rvals_bb,bb_idx
         return rvals_bb
 
 
@@ -1329,11 +1433,9 @@ class Data(object):
         self._verbosity = verbosity
 
         if tstart is not None:
-            if tstart < 100000:
-                tstart = mjd2met(tstart)
+            tstart = infer_met(tstart)
         if tstop is not None:
-            if tstop < 100000:
-                tstop = mjd2met(tstop)
+            tstop = infer_met(tstop)
         
         lt = py_exposure_p8.Livetime(ft2files,ft1files,
                 tstart=tstart,tstop=tstop,verbose=verbosity)
@@ -1482,7 +1584,34 @@ class Data(object):
 
         self.E = np.sum(self.exposure)
         self.S = np.sum(self.we)
-        self.B = len(self.we)-self.S
+        self.B = len(self.we) - self.S
+
+    def zero_weight(self,tstart,tstop):
+        """ Zero out data between tstart and tstop.
+
+        Parameters
+        ----------
+        tstart : beginning of zero interval (MET, but will infer from MJD)
+        ttop : end of zero interval (MET, but will infer from MJD)
+        """
+        tstart = infer_met(tstart)
+        tstop = infer_met(tstop)
+        mask = ~((self.TSTART >= tstart) & (self.TSTOP <= tstop))
+        event_mask = mask[np.searchsorted(self.TSTOP,self.ti)]
+
+        # Adjust exposure
+        self.exposure = self.exposure[mask]
+        self.cexposure = np.cumsum(self.exposure)
+        self.E = self.cexposure[-1]
+        self.TSTART = self.TSTART[mask]
+        self.TSTOP = self.TSTOP[mask]
+        self.LIVETIME = self.LIVETIME[mask]
+
+        # Delete events and adjust predicted counts
+        self.ti = self.ti[event_mask]
+        self.we = self.we[event_mask]
+        self.S = np.sum(self.we)
+        self.B = len(self.we) - self.S
 
     def __setstate__(self,state):
         if not '_barycon' in state:
@@ -1886,8 +2015,7 @@ class Data(object):
 
         if tstart is None:
             tstart = self.TSTART[0]
-        if tstart < 100000:
-            tstart = mjd2met(tstart)
+        tstart = infer_met(tstart)
         if tstart < self.TSTART[0]:
             print('Warning: Start time precedes start of exposure.')
             print('Will clip to MET=%.2f.'%(self.TSTART[0]))
@@ -1895,8 +2023,7 @@ class Data(object):
 
         if tstop is None:
             tstop = self.TSTOP[-1]
-        if tstop < 100000:
-            tstop = mjd2met(tstop)
+        tstop = infer_met(tstop)
         if tstop > self.TSTOP[-1]:
             print('Warning: Stop time follows end of exposure.')
             print('Will clip to MET=%.2f.'%(self.TSTOP[-1]))
@@ -1968,26 +2095,19 @@ class Data(object):
         else:
             exposure_mask = slice(0,len(starts))
 
+        scales = None
         if randomize:
-            # Redistribute the weights according to exposure
-            rng = np.random.default_rng(seed)
-            indices = np.searchsorted(cexp/cexp[-1],rng.random(len(times)))
-            a = np.argsort(indices)
-            # These lines re-order the times/weights, and set the event_idx
-            # field (which maps events to cells) to map the times/weights 
-            # to the new, randomly chosen cells.
-            times = times[a]
-            weights = weights[a]
-            event_idx = indices[a]
-
-        elif source_scaler is not None:
-            # Redistribute the weights:
-            # (1) background events follow the exposure
-            # (2) source events follow the scaled exposure
+            scales = 1.
+        if source_scaler is not None:
             # NB -- exposure in topocentric time, but flux scaling in bary
             bstarts,bstops = bary_edges[:-1],bary_edges[1:]
             #bstarts,bstops = starts,stops
             scales = source_scaler(bstarts,bstops)
+
+        if scales is not None:
+            # Redistribute the weights:
+            # (1) background events follow the exposure
+            # (2) source events follow the scaled exposure
 
             rng = np.random.default_rng(seed)
             mask = rng.random(len(times)) >= weights
@@ -2248,8 +2368,8 @@ class CellsLogLikelihoodOld(object):
         self.cells = cells
         self.nph = np.sum([len(c.we) for c in cells])
         self.exp = np.asarray([c.exp for c in cells])
-        self.weights = np.empty(self.nph,dtype=np.float32)
-        self.alpha_indices = np.empty(self.nph,dtype=int)
+        self.weights = np.empty(self.nph,dtype=np.float64)
+        self.alpha_indices = np.full(self.nph,-1,dtype=int)
         ctr = 0
         for i,ic in enumerate(cells):
             nph = len(ic.we)
@@ -2257,8 +2377,9 @@ class CellsLogLikelihoodOld(object):
             self.weights[s] = ic.we
             self.alpha_indices[s] = i
             ctr += nph
+        assert(not(np.any(self.alpha_indices==-1)))
 
-        self._tmp1 = np.empty(self.nph,dtype=np.float32)
+        self._tmp1 = np.empty(self.nph,dtype=np.float64)
         self.bweights = 1-self.weights
         self.tmids = np.asarray([c.get_tmid() for c in self.cells])
 
@@ -2459,8 +2580,12 @@ def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
         amplitudes, and their uncertainties.  (NB these are the
         *fractional* modulation coefficients.)
 
-    Returns: frequencies, P_0 (background fixed power spectrum), 
-        P_1 (background-free spectrum), P_b (power spectrum of background)
+    Returns
+    -------
+    frequencies : in Hz
+    P_0 : background fixed power spectrum
+    P_1 : background-free spectrum
+    P_b : power spectrum of background
 
     NB: The resulting power spectrum extends only halfway to the Nyquist
     frequency of the input time series because the "upper half" of the
@@ -2474,6 +2599,7 @@ def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
     test, the effective sqrt(N) is smaller than otherwise might seem.
 
     Use no_zero_pad to return ia critically sampled power spectrum.
+
     """
     cells = timeseries
 
@@ -2697,7 +2823,12 @@ def get_orbital_modulation(ts,freqs):
 
 def plot_clls_lc(rvals,ax=None,scale='linear',min_mjd=None,max_mjd=None,
         ul_color='C1',meas_color='C0'):
-    """ Make a plot of the output lc CellsLogLikelihood.get_lightcurve.
+    """ Make a plot of the output of CellsLogLikelihood.get_lightcurve.
+
+    rvals is (N,5) array, with each entry being
+        MJDs MJD bin width, flux/alpha, flux_er_lo/uplim, flux_err_hi
+
+    If the entry is an upper limit, flux_err_hi == -1.
     """
     if min_mjd is not None:
         mask = rvals[:,0] >= min_mjd
