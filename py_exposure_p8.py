@@ -86,82 +86,8 @@ def get_contiguous_exposures(TSTART,TSTOP,tstart=None,tstop=None,
         return good_starts,good_stops,np.flatnonzero(break_mask)+1
     return good_starts,good_stops
 
-def adjust_cosines(TSTART,TSTOP,pcosines,acosines=None,zcosines=None,
+def adjust_cosines(TSTART,TSTOP,pcosines,acosines,zcosines,
         oversample=False):
-    """ Interpolate in polar angle, azimuth, and zenith.
-    """
-
-    dbug['T0'] = TSTART
-    dbug['T1'] = TSTOP
-    dbug['pcos0'] = pcosines
-    dbug['acos0'] = acosines
-    dbug['zcos0'] = zcosines
-    assert(len(pcosines)==len(TSTART))
-    _,_,idx = get_contiguous_exposures(TSTART,TSTOP,get_indices=True)
-    edges = np.append(0,idx)
-    if idx[-1] < len(pcosines):
-        edges = np.append(edges,len(pcosines))
-
-    N = len(pcosines)
-    if oversample:
-        N *= 2
-    prvals = np.empty(N)
-    arvals = np.empty(N) if (acosines is not None) else None
-    zrvals = np.empty(N) if (zcosines is not None) else None
-    # TMP
-    prvals[:] = np.nan
-
-    def interpolate(dx,y,oversample=False,clip_min=-1):
-
-        if len(y) == 1:
-            if oversample:
-                return np.asarray([y[0],y[0]])
-            return y
-
-        # evaluate the slope and extrapolate the final point
-        m = np.empty(len(y))
-        m[:-1] = y[1:]-y[:-1]
-        # in case the last bin is shorter than the preceding one, correct
-        # the slop for its duration
-        m[-1] = m[-2]*dx[-1]/dx[-2]
-
-        if oversample:
-            rvals = np.empty(len(y)*2)
-            rvals[0::2] = y + m*0.25
-            rvals[1::2] = y + m*0.75
-        else:
-            rvals = y + m*0.5
-
-        return np.clip(rvals,clip_min,1,out=rvals)
-
-    for i0,i1 in zip(edges[:-1],edges[1:]):
-        dx = TSTOP[i0:i1] - TSTART[i0:i1]
-        if oversample:
-            mi0,mi1 = 2*i0,2*i1
-        else:
-            mi0,mi1 = i0,i1
-        prvals[mi0:mi1] = interpolate(
-                dx,pcosines[i0:i1],oversample=oversample)
-        if arvals is not None:
-            arvals[mi0:mi1] = interpolate(
-                    dx,acosines[i0:i1],oversample=oversample,clip_min=0)
-        if zrvals is not None:
-            zrvals[mi0:mi1] = interpolate(
-                    dx,zcosines[i0:i1],oversample=oversample)
-    # TMP
-    assert(not np.any(np.isnan(prvals)))
-    dbug['pcos1'] = prvals
-    dbug['acos1'] = arvals
-    dbug['zcos1'] = zrvals
-    return prvals,arvals,zrvals
-
-def adjust_cosines2(TSTART,TSTOP,pcosines,acosines,zcosines,
-        oversample=False):
-    dbug['pcos0'] = pcosines.copy()
-    dbug['acos0'] = acosines.copy()
-    dbug['zcos0'] = zcosines.copy()
-    dbug['t0'] = TSTART.copy()
-    dbug['t1'] = TSTOP.copy()
     # find breaks in the orbit
     idx = np.flatnonzero(TSTART[1:]-TSTOP[:-1] > 30.1)
     i0s = np.append(0,idx+1)
@@ -231,45 +157,7 @@ def adjust_cosines2(TSTART,TSTOP,pcosines,acosines,zcosines,
     avals[avals>1] = 2-(avals[avals>1]) # = 1-(val-1) = 2-val
     pvals[pvals>1] = 2-(pvals[pvals>1])
     zvals[zvals>1] = 2-(zvals[zvals>1])
-    dbug['pcos1'] = pvals.copy()
-    dbug['acos1'] = avals.copy()
-    dbug['zcos1'] = zvals.copy()
     return pvals,avals,zvals
-
-# This is an adhoc attempt to correct exposure to bin center AFTER collapse
-# to a scalar.  Fast but not very useful...?
-def adjust_exposure(TSTART,TSTOP,exposure):
-
-    assert(len(exposure)==len(TSTART))
-    _,_,idx = get_contiguous_exposures(TSTART,TSTOP,get_indices=True)
-    edges = np.append(0,idx)
-    if idx[-1] < len(exposure):
-        edges = np.append(edges,len(exposure))
-
-    rvals = np.empty_like(exposure)
-    # TMP
-    rvals[:] = np.nan
-
-    def interpolate(x,y,xmid):
-
-        if len(x) == 1:
-            return y
-        elif len(x) == 2:
-            kind = 'linear'
-        else:
-            kind = 'quadratic'
-
-        ip = interp1d(x,y,kind=kind,bounds_error=False,
-                fill_value='extrapolate')
-        return np.maximum(0,ip(xmid))
-
-    for i0,i1 in zip(edges[:-1],edges[1:]):
-        x0 = TSTART[i0:i1]
-        xmid = 0.5*(x0+TSTOP[i0:i1])
-        rvals[i0:i1] = interpolate(x0,exposure[i0:i1],xmid)
-    # TMP
-    assert(not np.any(np.isnan(rvals)))
-    return rvals
 
 class InterpTable(object):
     """ Implement 2d bilinear or nearest neighbor interpolation.
@@ -735,7 +623,7 @@ class Livetime(object):
             acosines = None
 
         if oversample:
-            pcosines,acosines,zcosines = adjust_cosines2(
+            pcosines,acosines,zcosines = adjust_cosines(
                     T0,T1,pcosines,acosines,zcosines,oversample=True)
             dT = T1-T0
             new_T0 = np.empty(len(T0)*2)
@@ -757,7 +645,7 @@ class Livetime(object):
             mask = new_mask
 
         elif apply_correction:
-            pcosines,acosines,zcosines = adjust_cosines2(
+            pcosines,acosines,zcosines = adjust_cosines(
                     T0,T1,pcosines,acosines,zcosines,oversample=False)
 
         # make final mask

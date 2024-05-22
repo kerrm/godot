@@ -9,6 +9,7 @@ from scipy.interpolate import interp1d
 from scipy.stats import chi2
 
 from . import bary
+from . import events
 from . import py_exposure_p8
 
 from importlib import reload
@@ -33,34 +34,48 @@ def infer_met(time):
         return mjd2met(time)
     return time
 
-def parse_dss(hdulist):
-    """ Return some information about the data cuts in an FT1 file using
-    the DSS keywords.
+class PSFTypeSelector():
+    """ Select event types as a function of energy.  This is used for
+        selecting events and for computing the weighted effective area.
 
-    Specifically, the relevant max radius, energy, and zenith angle cuts.
-
-    Returns
-    -------
-    (ra,dec,maxrad), (emin,emax), (zmax)
+    We assume there is no maximum energy for a given PSF type.
     """
-    rcuts = None
-    ecuts = None
-    zmax = None
-    h = hdulist[1]._header
-    ndss = len([x for x in h.keys() if x.startswith('DSTYP')])
-    for idss in range(1,ndss+1):
-        dstyp = h[f'DSTYP{idss}'].strip()
-        dsval = h[f'DSVAL{idss}'].strip()
-        if dsval.startswith('CIRCLE'):
-            rcuts = [float(x) for x in dsval[8:-1].split(',')]
-            continue
-        if dstyp == 'ZENITH_ANGLE':
-            zmax = float(dsval.split(':')[-1])
-            continue
-        if dstyp == 'ENERGY':
-            ecuts = [float(x) for x in dsval.split(':')]
-            continue
-    return rcuts,ecuts,zmax
+    def __init__(self,min_energies=10**np.asarray([2.75,2.5,2.25,2.00])):
+        if not len(min_energies)==4:
+            raise ValueError('Provide a minimum energy for each PSF type.')
+        self._men = np.asarray(min_energies)
+        if not np.all((self._men[:-1] > self._men[1:])):
+            raise Warning('Minimum energies should probably decrease with PSF type.')
+
+    def accept(self,en,evtype):
+        """ Return TRUE where the evtype satisfies the minimum for the
+            provided energy.
+        """
+        en = np.atleast_1d(en)
+        evtype = np.atleast_1d(evtype)
+        ok = np.full(len(en),False,dtype=bool)
+        for i in range(4):
+            m = evtype==i
+            ok[m] = en[m] >= self._men[i]
+        return np.squeeze(ok)
+
+
+class FBTypeSelector():
+    """ Select event types as a function of energy.  This is used for
+        selecting events and for computing the weighted effective area.
+
+    It is assumed there is no minimum energy for front-type events, so
+    the only parameter is the minimum energy for BACK events.
+    """
+    def __init__(self,min_back_energy=10**2.5):
+        self._mbe = min_back_energy
+
+    def accept(self,en,evtype):
+        """ Return TRUE where the evtype satisfies the minimum for the
+            provided energy.
+        """
+        return evtype==0 | (evtype==1 & en >= self._mbe)
+
 
 class Cell(object):
     """ Encapsulate the concept of a Cell, specifically a start/stop
@@ -107,11 +122,11 @@ def cell_from_cells(cells):
     cells = sorted(cells,key=lambda cell:cell.tstart)
     tstart = cells[0].tstart
     we = np.concatenate([c.we for c in cells])
-    ti = np.concatenate([c.we for c in cells])
-    exp = np.sum((c.exp for c in cells))
-    if not np.all(np.asarray([c.SonB for c in cells])==cells[0].SonB):
-        raise Exception('Cells do not all have same source flux!')
-    return Cell(cells[0].tstart,cells[-1].tstop,exp,ti,we,cells[0].SonB)
+    ti = np.concatenate([c.ti for c in cells])
+    exp = np.asarray([c.exp for c in cells]).sum()
+    bexp = np.asarray([c.exp/c.SonB for c in cells]).sum()
+    SonB = exp/bexp
+    return Cell(cells[0].tstart,cells[-1].tstop,exp,ti,we,SonB)
 
 class CellTimeSeries(object):
     """ Encapsulate binned data from cells, specifically the exposure,
@@ -199,7 +214,13 @@ class CellTimeSeries(object):
 
 class CellLogLikelihood(object):
 
-    def __init__(self,cell,reverse=False,maxweight=1-1e-9):
+    def __init__(self,cell,swap=False):
+        """ 
+        Parameters
+        ----------
+        cell : a Cell object to form the likelihood for
+        swap : swap the source and the background
+        """
         self.cell = cell
         self.ti = cell.ti
         #self.we = cell.we.astype(np.float64)
@@ -208,7 +229,7 @@ class CellLogLikelihood(object):
         self.iwe = 1-self.we
         self.S = cell.exp*cell._alpha
         self.B = cell.exp/cell.SonB*cell._beta
-        if reverse:
+        if swap:
             self.we,self.iwe = self.iwe,self.we
             self.S,self.B = self.B,self.S
         self._tmp1 = np.empty_like(self.we)
@@ -932,14 +953,27 @@ class CellsLogLikelihood(object):
         edges.  Still then have the problem of finding the maximum for
         irregular sampling.
     """
-    def __init__(self,cells,profile_background=False,reverse=False):
+    def __init__(self,cells,profile_background=False,swap=False,
+            reverse=False):
+        """
+        Parameters
+        ----------
+        cells : a list of Cell objects
+        profile_background: use the profile likelihood instead of b=1
+        swap : swap the source and the background
+        reverse : change the time-order of the Cells; this is useful for
+            checking that e.g. BB results are the same when looking
+            forwards or backwards.  They ought to be!
+        """
 
         # construct a sampled log likelihoods for each cell
-        self.clls = [CellLogLikelihood(x,reverse=reverse) for x in cells]
+        if reverse:
+            cells = cells[::-1]
+        self.clls = [CellLogLikelihood(x,swap=swap) for x in cells]
         npt = 200
         self._cod = np.empty([len(cells),npt])
         self._dom = np.empty([len(cells),npt])
-        self._reverse = reverse
+        self._swap = swap
         self.cells = cells
 
         for icll,cll in enumerate(self.clls):
@@ -1258,14 +1292,14 @@ class CellsLogLikelihood(object):
         if not no_bb:
             bb_idx,bb_ts,var_ts,var_dof,fitness = self.do_bb(prior=bb_prior)
             if var_dof == 0:
-                print('No segments, no variability!')
+                print('Variability significance: no segments')
             else:
-                print('Variability significance: ',chi2.sf(var_ts,var_dof))
+                print(f'Variability significance: {chi2.sf(var_ts,var_dof):4.2g}')
             bb_idx = np.append(bb_idx,len(self.cells))
             rvals_bb = np.empty([len(bb_idx)-1,5 if no_ts else 6])
             for ibb,(start,stop) in enumerate(zip(bb_idx[:-1],bb_idx[1:])):
                 cells = cell_from_cells(self.cells[start:stop])
-                cll = CellLogLikelihood(cells,reverse=self._reverse)
+                cll = CellLogLikelihood(cells,swap=self._swap)
                 if cll.S==0:
                     rvals_bb[ibb] = np.nan
                     continue
@@ -1331,7 +1365,7 @@ class CellsLogLikelihood(object):
         rvals_bb = np.empty([len(bb_idx)-1,5])
         for ibb,(start,stop) in enumerate(zip(bb_idx[:-1],bb_idx[1:])):
             cells = cell_from_cells(self.cells[start:stop])
-            cll = CellLogLikelihood(cells,reverse=self._reverse)
+            cll = CellLogLikelihood(cells,swap=self._swap)
             if cll.S==0:
                 rvals_bb[ibb] = np.nan
                 continue
@@ -1378,13 +1412,12 @@ class PhaseCellsLogLikelihood(CellsLogLikelihood):
 class Data(object):
 
     def __init__(self,ft1files,ft2files,ra,dec,weight_col,
-            zenith_cut=90,minimum_exposure=3e4,use_phi=True,
-            base_spectrum=None,use_weights_for_exposure=False,
-            weight_cut=1,max_radius=None,bary_ft1files=None,
-            tstart=None,tstop=None,apply_8year_scale=False,
+            zenith_cut=90,theta_cut=0.4,minimum_exposure=3e4,use_phi=True,
+            base_spectrum=None,max_radius=None,bary_ft1files=None,
+            tstart=None,tstop=None,
             verbosity=1,correct_efficiency=True,correct_cosines=True,
-            correct_psf=True,use_psf_types=False,correct_aeff=False,
-            theta_cut=0.4):
+            correct_psf=True,correct_aeff=False,
+            use_psf_types=True,type_selector=None):
         """ 
 
         Generally, the times for everything should be topocentric.
@@ -1399,8 +1432,8 @@ class Data(object):
         ft2files : the FT2 files
         ra : R.A. of source (deg)
         dec : Decl. of source (deg)
-        weight_cut : fraction of source photons to retain
         zenith_cut : maximum zenith angle for data/exposure calc. (deg)
+        theta_cut : livetime cut on zenith angle (cosine(zenith))
         minimum_exposure : TODO
         use_phi : use phi-dependence in effective area calculation
         max_radius : maximum photon separation from source [deg]
@@ -1409,14 +1442,15 @@ class Data(object):
         tstart: cut time to apply to dataset; notionally MET, but will 
             attempt to convert from MJD if < 100,000.
         tstop : as tstart
-        apply_8year_scale : deprecated?
         correct_efficiency: apply trigger efficiency (from livetime)
         correct_cosines: apply in-bin S/C attitude correction;  see below
         correct_psf : apply aperture completeness correction
         correct_aeff : apply very minor correction (~1%) estimated from
             Vela and Geminga
         use_psf_types : use PSF-types IRF for exposure calculation
-        theta_cut : livetime cut on zenith angle (cosine(zenith))
+        type_selector: an optional instance of PSFTypeSelector, e.g., which
+            will be used to make an energy-dependence selection on event
+            type
 
         The FT2 values are tabulated such that the S/C position is given
         at the START time.  Whereas the livetime etc. are accumulated over
@@ -1429,51 +1463,51 @@ class Data(object):
         self.ft2files = ft2files
         self.max_radius = max_radius
         self.ra,self.dec = ra,dec
-        self._barycon = None
         self._verbosity = verbosity
 
         if tstart is not None:
             tstart = infer_met(tstart)
         if tstop is not None:
             tstop = infer_met(tstop)
+        if type_selector is not None:
+            if use_psf_types:
+                assert(isinstance(type_selector,PSFTypeSelector))
+            else:
+                assert(isinstance(type_selector,FBTypeSelector))
+
+        # Get DSS information from first FT1 file; the others will be
+        # checked for consistency in _load_photons
+        rcuts,ecuts,zmax,evtclass = events.parse_dss(
+            fits.getheader(ft1files[0],1))
+        emin,emax = ecuts # in MeV
         
         lt = py_exposure_p8.Livetime(ft2files,ft1files,
                 tstart=tstart,tstop=tstop,verbose=verbosity)
 
-        # Get DSS information from first FT1 file; the others will be
-        # checked for consistency in _load_photons
-        rcuts,ecuts,zmax = parse_dss(fits.open(ft1files[0]))
-        emin,emax = ecuts # in MeV
-
-        # TMP
-        #self._lt = lt
-        # end TMP
+        # Get the geometry and livetime information from the FT2 file
         lt_mask,pcosines,acosines,START,STOP,LIVETIME = lt.get_cosines(
                 np.radians(ra),np.radians(dec),
                 theta_cut=theta_cut,
                 zenith_cut=np.cos(np.radians(zenith_cut)),
                 get_phi=True,apply_correction=correct_cosines)
-        # TMP?
-        lat_geo = lt.LAT_GEO[lt_mask]
-        lon_geo = lt.LON_GEO[lt_mask]
-        mcl = lt.L_MCILWAIN[lt_mask]
-        mcb = lt.B_MCILWAIN[lt_mask]
-        glat1 = lt.GEOMAG_LAT[lt_mask]
-        glat2 = lt.LAMBDA[lt_mask]
-        # end TMP?
+
         phi = np.arccos(acosines) if use_phi else None
-        if use_weights_for_exposure:
-            base_spectrum = None
+
         if correct_efficiency:
             ltfrac = LIVETIME/(STOP-START)
             print(f'Median livetime fraction: {np.median(ltfrac):.2f}')
         else:
             ltfrac = None
+
+        # TODO -- OK, here is where we want to put the PSFType selector
+        # can actually make it general and take 0-3 or 0-1 depending on
+        # the types being used
         aeff,texp_edom,texp = self._get_weighted_aeff(
                 pcosines,phi,
                 base_spectrum=base_spectrum,ltfrac=ltfrac,
                 correct_psf=correct_psf,use_psf_types=use_psf_types,
-                emin=emin,emax=emax)
+                emin=emin,emax=emax,type_selector=type_selector)
+
         self.total_exposure_edom = texp_edom
         self.total_exposure = texp
         exposure = aeff*LIVETIME
@@ -1485,40 +1519,19 @@ class Data(object):
         # just get rid of any odd bins -- this cut corresponds to roughly
         # 30 seconds of exposure at the edge of the FoV; in practice it
         # doesn't remove too many photons
-
-        # !!!
-        # TMP -- decrease minimum exposure when oversampling!!
-        minimum_exposure *= 0.5
-        # !!!
-
         self.minimum_exposure = minimum_exposure
         minexp_mask = exposure > minimum_exposure
 
-        #self.TSTART = lt.START[full_mask]
-        #self.TSTOP = lt.STOP[full_mask]
-        #self.LIVETIME = lt.LIVETIME[full_mask]
         self.TSTART = START[minexp_mask]
         self.TSTOP = STOP[minexp_mask]
         self.LIVETIME = LIVETIME[minexp_mask]
         self.exposure = exposure[minexp_mask]
-        self.cexposure = np.cumsum(self.exposure)
-        ## TMP?
-        self._pcosines = pcosines[minexp_mask]
-        self._acosines = acosines[minexp_mask]
-        ## end TMP?
-        # TMP?
-        self._lat_geo = lat_geo[minexp_mask]
-        self._lon_geo = lon_geo[minexp_mask]
-        self._mcl = mcl[minexp_mask]
-        self._mcb = mcb[minexp_mask]
-        self._glat1 = glat1[minexp_mask]
-        self._glat2 = glat2[minexp_mask]
-        self._ltfrac = ltfrac[minexp_mask]
-        # end TMP
 
-        data,self.timeref,photon_idx,ecuts = self._load_photons(
+        # Load in the photons from the FT1 files
+        data,datacols,self.timeref,_,_ = self._load_photons(
                 ft1files,weight_col,self.TSTART[0],self.TSTOP[-1],
-                max_radius=max_radius,zenith_cut=zenith_cut)
+                max_radius=max_radius,zenith_cut=zenith_cut,
+                type_selector=type_selector)
         ti = data[0]
         if self.timeref=='SOLARSYSTEM':
             print('WARNING!!!!  Barycentric data not accurately treated')
@@ -1530,61 +1543,38 @@ class Data(object):
         event_mask &= lt.get_gti_mask(ti)
         self.event_mask = event_mask
 
-
         # TODO add a check for FT2 files that are shorter than observation
-
         data = [d[event_mask].copy() for d in data]
         self.ti = data[0]
         self.we = data[1]
         self.other_data = data[2:]
+        self.datacols = datacols
 
         if bary_ft1files is not None:
-            data,timeref,photon_idx,ecuts = self._load_photons(
+            # This needs to be fixed before next use
+            raise NotImplementedError()
+            data,datacols,timeref,photon_idx,ecuts = self._load_photons(
                     bary_ft1files,weight_col,
                     None,None,max_radius=max_radius,no_filter=True,
-                    zenith_cut=zenith_cut)
+                    zenith_cut=zenith_cut,type_selector=type_selector)
             self.bary_ti = (data[0][photon_idx][event_mask]).copy()
         else:
             self.bary_ti = None
 
-        if use_weights_for_exposure:
-            print('beginning exposure refinement')
-            # do a refinement of exposure calculation
-            aeff,self.total_exposure_edom,self.total_exposure = self._get_weighted_aeff(pcosines,phi,base_spectrum=None,use_event_weights=True,livetime=self.LIVETIME)
-            print('finished exposure refinement')
-
-
         # do another sort into the non-zero times
         event_idx = self.event_idx = np.searchsorted(self.TSTOP,self.ti)
 
-        self.weight_cut = weight_cut
-        if weight_cut < 1:
-            swe = np.sort(self.we)
-            t = np.cumsum(swe)
-            wmin = swe[np.searchsorted(t,(1-weight_cut)*t[-1])]
-            mask = self.we >= wmin
-            self.we = self.we[mask]
-            self.ti = self.ti[mask]
-            if self.bary_ti is not None:
-                self.bary_ti = self.bary_ti[mask]
-            # not sure if want to do this, but this preserves source flux
-            self.exposure *= self.weight_cut
+        # store the source and background exposure explicitly to enable
+        # time-dependent modifications
+        S = self.S = np.sum(self.we)
+        B = self.B = len(self.we) - S
+        E = self.E = np.sum(self.E)
+        self.sexposure = None
+        self.bexposure = None
 
-        if apply_8year_scale:
-            # reweight everything so that variable sources whose weights
-            # are computed with an 8-year model will have correct scaling
-            # to give a mean flux of 1 over the full data range
-            mask = self.ti < t1_8year
-            emask = self.TSTOP <= t1_8year
-            s8 = self.we[mask].sum()/self.exposure[emask].sum()
-            stot = self.we.sum()/self.exposure.sum()
-            new_alpha = stot/s8
-            print('Rescaling with alpha=%.2f.'%(new_alpha))
-            self.we = new_alpha*self.we/(new_alpha*self.we+(1-self.we))
-
-        self.E = np.sum(self.exposure)
-        self.S = np.sum(self.we)
-        self.B = len(self.we) - self.S
+    def _vprint(self,s,level):
+        if self._verbosity >= level:
+            print(s)
 
     def zero_weight(self,tstart,tstop):
         """ Zero out data between tstart and tstop.
@@ -1614,13 +1604,41 @@ class Data(object):
         self.B = len(self.we) - self.S
 
     def __setstate__(self,state):
-        if not '_barycon' in state:
-            state['_barycon'] = None
+        if not 'sexposure' in state:
+            state['sexposure'] = None
+        if not 'bexposure' in state:
+            state['bexposure'] = None
         self.__dict__.update(state)
 
     def _get_weighted_aeff(self,pcosines,phi,base_spectrum=None,
-            use_event_weights=False,livetime=None,ltfrac=None,
-            correct_psf=True,use_psf_types=False,emin=100,emax=1e5):
+            ltfrac=None,correct_psf=True,
+            use_psf_types=True,type_selector=None,emin=100,emax=1e5):
+        """ Compute the "effective effective area" for the data selection.
+
+        Typically, this will involve averaging the effective area over the
+        energy range.  Additionally, by default, the finite aperture size
+        will be taken into account by computing the fraction of the PSF
+        contained at each energy slice.
+
+        Parameters
+        ----------
+        pcosines : the polar angle cosines, vz. cos(theta)
+        phi : azimuthal angle (radians); if not None, then the azimuthal
+            dependence of the effective area will be applied
+        base_spectrum : if None, will use an E^-2 weighting; otherwise,
+            a function returning dN/dE(E)
+        ltfrac : a livetime fraction entry for each interval. If not None,
+            will apply the efficiency correction to the aeff
+        correct_psf : scale the effective area by the fraction of the PSF
+            contained at the energy slice
+        type_selector : an instance of PSFTypeSelector, e.g., which will
+            give an energy-dependent event type selection.  Those events
+            which are not selected will be omitted from the effective area
+            sum.
+        use_psf_types : event types are PSF types; otherwise, front/back
+        emin : minimum energy of integration (MeV)
+        emax : maximum energy of integration (MeV)
+        """
 
         emin = np.log10(emin)
         emax = np.log10(emax)
@@ -1633,196 +1651,236 @@ class Data(object):
             ec = py_exposure_p8.EfficiencyCorrection()
         else:
             ec = None
-
         if use_psf_types:
             event_types = [f'PSF{i}' for i in range(4)]
+            event_codes = range(0,4)
         else:
             event_types = ['FRONT','BACK']
+            event_codes = range(0,2)
 
-        if base_spectrum is not None:
-            edom = np.logspace(emin,emax,25)
-            wts = base_spectrum(edom)
-            # this is the exposure as a function of energy
-            total_exposure = np.empty_like(edom)
-            rvals = np.zeros([len(edom),len(pcosines)])
-            for i,(en,wt) in enumerate(zip(edom,wts)):
-                for event_type in event_types:
-                    aeff = ea(en,pcosines,event_type,phi=phi)
-                    if pc is not None:
-                        aeff *= pc(en,pcosines,event_type)
-                    if ec is not None:
-                        aeff *= ec(en,ltfrac,event_type)
-                    rvals[i] += aeff
-                total_exposure[i] = rvals[i].sum()
-                rvals[i] *= wt
-            aeff = simps(rvals,edom,axis=0)/simps(wts,edom)
-        elif use_event_weights:
-            raise NotImplementedError()
-            # TODO -- this is a real mess.  Make this more consistent
-            # or else break it out.  On the bright sde, it seems to work!
-            # also, this can be speeded up substantially by binning in cos
-            # theta, at least for calculating the exposure.
-            if livetime is None:
-                raise ValueError('Must provide livetime argument.')
-            try:
-                en = self.other_data[self.other_data_cols.index('energy')]
-            except ValueError:
-                return self._get_weighted_aeff(pcosines,phi,base_spectrum=base_spectrum,use_event_weights=False,ltfrac=ltfrac)
-            edom = np.logspace(emin,emax,25)
-            wcts = np.histogram(en,weights=self.we,bins=edom)[0]
-            ledom = np.log10(edom)
-            edom = 10**(0.5*(ledom[:-1]+ledom[1:]))
-            rvals = np.empty([len(edom),len(pcosines)])
-            wts = np.empty(len(edom))
-            total_exposure = np.empty_like(edom)
-            for i in range(len(edom)):
-                faeff,baeff = ea([edom[i]],pcosines,phi=phi)
-                faeff += baeff
-                total_exposure[i] = np.sum(faeff*livetime)
-                wts[i] = wcts[i]/total_exposure[i]
-                rvals[i] = (faeff+baeff)*wts[i]
-            # cache the weights for double checking
-            self._exposure_weights = wts
-            aeff = simps(rvals,edom,axis=0)/simps(wts,edom)
-        else:
-            edom = [1000]
-            faeff = ea([1000],pcosines,'FRONT',phi=phi)
-            baeff = ea([1000],pcosines,'BACK',phi=phi)
-            aeff = faeff+baeff
-            total_exposure = [aeff.sum()]
+        if base_spectrum is None:
+            base_spectrum = lambda E: E**-2
+
+        # try to pick something like 8/decade
+        nbin = int(round((emax-emin)*8))+1
+        edom = np.logspace(emin,emax,nbin)
+        wts = base_spectrum(edom)
+        # this is the exposure as a function of energy
+        total_exposure = np.empty_like(edom)
+        rvals = np.zeros([len(edom),len(pcosines)])
+        for i,(en,wt) in enumerate(zip(edom,wts)):
+            for etype,ecode in zip(event_types,event_codes):
+                if type_selector is not None:
+                    # check to see if we are using this en/ct
+                    if not type_selector.accept(en,ecode):
+                        self._vprint(f'Skipping {en:.2f},{ecode}.',2)
+                        continue
+                aeff = ea(en,pcosines,etype,phi=phi)
+                if pc is not None: # PSF correction
+                    aeff *= pc(en,pcosines,etype)
+                if ec is not None: # efficiency correction
+                    aeff *= ec(en,ltfrac,etype)
+                rvals[i] += aeff
+            total_exposure[i] = rvals[i].sum()
+            rvals[i] *= wt
+        aeff = simps(rvals,edom,axis=0)/simps(wts,edom)
+
         return aeff,edom,total_exposure
 
     def _load_photons(self,ft1files,weight_col,tstart,tstop,
             max_radius=None,time_col='time',no_filter=False,
-            zenith_cut=100):
-        cols = [time_col,weight_col,'energy']
+            zenith_cut=100,type_selector=None):
+        """ Load events from the FT1 files.
+
+        Parameters
+        ----------
+        ft1files : a list of FT1 files
+        weight_col : the FT1 column giving the source photon probability
+        tstart : (MET) cut photons before this time (None OK)
+        tstop :  (MET) cut photons after  this time (None OK)
+        max_radius : (deg)
+        time_col : name of the FT1 column giving the event time
+        no_filter : do not sort or perform the time cut
+
+        Returns
+        -------
+        data : a list of FT1 columns, the entries of which are the rows
+            which survive the specified cuts; they are TIME, "WEIGHT", and
+            ENERGY
+        timeref : the TIMEREF entry of the FT1 files (same for all)
+        idx : an array which can be used to sort other FT1 columns
+        dss : the DSS selections (same for all)
+        """
+
+        cols = [time_col,weight_col,'energy','event_type']
         deques = [deque() for col in cols]
-        all_ecuts = None
-        all_rcuts = None
-        for ift1,ft1 in enumerate(ft1files):
-            f = fits.open(ft1)
-            rcuts,ecuts,zmax = parse_dss(f)
 
-            if all_ecuts is None:
-                all_ecuts = ecuts
-            else:
-                if not (all_ecuts[0]==ecuts[0] and all_ecuts[1]==ecuts[1]):
-                    raise ValueError('Data energy cuts were not consistent.')
-            if all_rcuts is None:
-                all_rcuts = rcuts
-            else:
-                tol = 1e-4 # deg
-                ra0,de0,rad0 = all_rcuts
-                ra1,de1,rad1 = rcuts
-                if not (abs(ra0-ra1) < tol):
-                    raise ValueError('Data RA values are not consistent: {ra0:.5f} != {ra1:.5f}')
-                if not (abs(de0-de1) < tol):
-                    raise ValueError('Data Dec values are not consistent: {de0:.5f} != {de1:.5f}')
-                if not (abs(rad0-rad1) < tol):
-                    raise ValueError('Data aperture radius values are not consistent: {rad0:.5f} != {rad1:.5f}')
+        # check DSS cuts against the ones in the first file
+        with fits.open(ft1files[0]) as f:
+            hdr = f[1]._header
+            rcuts0,ecuts0,zmax0,evtclass0 = dss0 = events.parse_dss(hdr)
+            timeref0 = hdr['timeref']
 
-
-            hdu = f['events']
+        def _check_metadata(hdr,tol=1e-4):
+            """ Check for consistency in the DSS keywords, zenith cuts,
+                time systems, and for the presence of the specified photon
+                weights column.
+            """
+            rcuts,ecuts,zmax,evtclass = dss = events.parse_dss(hdr)
+            if not (ecuts0[0]==ecuts[0] and ecuts0[1]==ecuts[1]):
+                raise ValueError('Data energy cuts were not consistent.')
+            ra0,de0,rad0 = rcuts0
+            ra1,de1,rad1 = rcuts
+            if not (abs(ra0-ra1) < tol):
+                raise ValueError(f'Data RA values are not consistent: {ra0:.5f} != {ra1:.5f}')
+            if not (abs(de0-de1) < tol):
+                raise ValueError(f'Data Dec values are not consistent: {de0:.5f} != {de1:.5f}')
+            if not (abs(rad0-rad1) < tol):
+                raise ValueError(f'Data aperture radius values are not consistent: {rad0:.5f} != {rad1:.5f}')
+            if not (evtclass0[0]==evtclass[0] and evtclass0[1]==evtclass[1]):
+                raise ValueError('Event class selection was not consistent.')
+            # raise an error if we've already cut more than requested; if
+            # it's the other way around, remove the larger zenith angle
+            # cuts later
             if zmax < zenith_cut:
                 raise ValueError(f'zenith_cut argument {zenith_cut} < {zmax} (data)')
-            if ift1 == 0:
-                timeref = hdu.header['timeref']
-            else:
-                if hdu.header['timeref'] != timeref:
-                    raise Exception('Different time systems!')
-            # sanity check for weights computation
-            try:
-                hdu.data.field(weight_col)
-            except KeyError:
-                print(f'FT1 file {ft1} did not have weights column {weight_col}!  Skipping.')
-                continue
+            if hdr['timeref'] != timeref0:
+                raise Exception('Different time systems!')
+            colnames = [x.name.lower() for x in f[1].columns]
+            if weight_col.lower() not in colnames:
+                raise ValueError(f'FT1 file {ft1} did not have weights column {weight_col}!')
+            return dss
 
-            mask = np.full(len(hdu.data['energy']),True,dtype=bool)
+        for ift1,ft1 in enumerate(ft1files):
+
+            f = fits.open(ft1)
+            hdu = f['events']
+            rcuts,ecuts,zmax,evtclass = _check_metadata(hdu._header)
+            nevt = hdu._header['naxis2']
+            mask = np.full(nevt,True,dtype=bool)
 
             if max_radius is not None:
-                ra = np.radians(hdu.data['ra'])
-                dec = np.radians(hdu.data['dec'])
-                cdec,sdec = np.cos(dec),np.sin(dec)
-                cdec_src = np.cos(np.radians(self.dec))
-                sdec_src = np.sin(np.radians(self.dec))
-                # cosine(polar angle) of source in S/C system
-                cosines  = cdec_src*np.cos(dec)*np.cos(ra-np.radians(self.ra)) + sdec_src*np.sin(dec)
-                mask &= (cosines >= np.cos(np.radians(max_radius)))
-                if (self._verbosity >= 2):
-                    print('keeping %d/%d photons for radius cut'%(mask.sum(),len(mask)))
+                mask &= events.radius_cut(hdu,self.ra,self.dec,max_radius)
+                self._vprint(f'{mask.sum()}/{nevt} pass radius cut',2)
 
+            # requesting a zenith cut more stringent than was applied
             if zenith_cut < zmax:
                 zmask = hdu.data['zenith_angle'] <= zenith_cut
-                if (self._verbosity >= 2):
-                    print('keeping %d/%d photons for zenith cut'%(zmask.sum(),len(zmask)))
+                self._vprint(f'{zmask.sum()}/{nevt} pass zenith cut',2)
                 mask &= zmask
 
+            # merge the columns into the cumulative deques
             for c,d in zip(cols,deques):
-                d.append(f[1].data.field(c)[mask])
+                if c == 'event_type':
+                    # load in as an integer array instead of 2d boolean
+                    dat = events.load_bitfield(ft1,c)[mask]
+                else:
+                    dat = hdu.data[c][mask]
+                d.append(dat)
+
+            f.close()
+
+        data = [np.concatenate(d) for d in deques]
+
+        if type_selector is not None:
+            ti,we,en,et = data
+            if isinstance(type_selector,PSFTypeSelector):
+                et = events.event_type_to_psf_type(et)
+            else:
+                et = events.event_type_to_fb_type(et)
+            mask = type_selector.accept(en,et)
+            for q in range(4):
+                m = et == q
+                print(f'{m.sum()} type={q} evts, keeping {mask[m].sum()}.')
+                print(f'{we[m].sum():.1f} type={q} wts, keeping {(we*mask)[m].sum():.1f}.')
+            print(f'accepting {mask.sum()}/{len(mask)} for ET selection.')
+            data = [d[mask] for d in data]
+
+        if no_filter:
+            return data,timeref0
 
         # sort everything on time (in case files unordered)
-        if no_filter:
-            data = [(np.concatenate(d)).copy() for d in deques]
-            return data,timeref
-
-        ti = np.concatenate(deques[0])
+        ti = data[0]
         a = np.argsort(ti)
-        #ti = ti[a] # I think this was incorrect
-        # the argsort mask order 
         if (tstart is not None) and (tstop is not None):
-            if self._verbosity >= 2:
-                print('applying time cut')
+            self._vprint('applying time cut',2)
             tstart = tstart or 0
             tstop = tstop or 999999999
             idx = a[(ti >= tstart) & (ti <= tstop)]
         else:
             idx = a
-        data = [(np.concatenate(d)[idx]).copy() for d in deques]
-        self.other_data_cols = cols[2:]
-        return data,timeref,idx,ecuts
+        data = [d[idx] for d in data]
+        return data,cols,timeref0,idx,dss0
 
-    def _bary2topo(self,bary_times,quiet=True):
-        if self._barycon is not None:
-            if not quiet:
-                print('Using cached interpolator.')
-            return self._barycon(bary_times)
-        # Ignores Fermi position, so just gives barycenter time to
-        # +/- 20ms accuracy.
-        # Generate a set of knots in topocentric time, currently 3hr.  
-        knot_space = 3600*3
-        topo_knots = np.arange(
-                self.TSTART[0]-2*knot_space,self.TSTOP[-1]+2*knot_space+1,
-                knot_space)
-        if (not quiet):
-            print('Warning!  This formulation does not account for travel time around the earth; all conversions done for geocenter.')
-        if not quiet:
-            print('beginning barycenter for topocentric knots')
-        bary_knots = bary.met2tdb(topo_knots,self.ra,self.dec)
-        if not quiet:
-            print('ending barycenter for topocentric knots')
-        self._barycon = interp1d(bary_knots,topo_knots,bounds_error=True)
-        return self._barycon(bary_times)
+    def _bary2topo(self,bary_times):
+        if not hasattr(self,'_b2t'):
+            self._b2t = self.get_bary2topo_interpolator()
+            self._vprint('Warning!  This formulation does not account for travel time around the earth; all conversions done for geocenter.',2)
+        return self._b2t(bary_times)
 
-    def get_exposure(self,times,deadtime_too=False):
-        """ Return the cumulative exposure at the given times.
+    def _topo2bary(self,topo_times):
+        if not hasattr(self,'_t2b'):
+            self._t2b = self.get_topo2bary_interpolator()
+            self._vprint('Warning!  This formulation does not account for travel time around the earth; all conversions done for geocenter.',2)
+        return self._t2b(topo_times)
+
+    def get_bary2topo_interpolator(self):
+        return bary.totopo_interpolator(self.TSTART[0],self.TSTOP[-1],
+                self.ra,self.dec)
+
+    def get_topo2bary_interpolator(self):
+        return bary.tobary_interpolator(self.TSTART[0],self.TSTOP[-1],
+                self.ra,self.dec)
+
+    def get_exposure(self,times,deadtime_too=False,cumulative=True):
+        """ Return the three exposures at the given times. These
+        are the original source exposure, the (possibly scaled) source
+        exposure, and the (possibly scaled) background exposure.
         """
+
         TSTART,TSTOP = self.TSTART,self.TSTOP
         idx = np.searchsorted(TSTOP,times)
+        if np.any(idx>=len(TSTOP)):
+            m = idx >= len(TSTOP)
+            print(m.sum())
+            print(times[m]-TSTOP[-1])
         # if time falls between exposures, the idx will be of the following
         # livetime entry, but that's OK, because we'll just mask on the
         # negative fraction; ditto for something that starts before
         frac = (times -TSTART[idx])/(TSTOP[idx]-TSTART[idx])
         np.clip(frac,0,1,out=frac)
-        cexp = self.cexposure[idx]-self.exposure[idx]*(1-frac)
-        if not deadtime_too:
-            return cexp
-        deadtime = (TSTOP-TSTART)-self.LIVETIME
-        cdead = np.cumsum(deadtime)[idx]-deadtime[idx]*(1-frac)
-        return cexp,cdead
+        # take the complementary fraction
+        frac = 1-frac
+
+        if self.sexposure is None:
+            # populate this on the first call
+            self.sexposure = (self.S/self.E) * self.exposure
+
+        if self.bexposure is None:
+            self.bexposure = (self.B/self.E) * self.exposure
+
+        cexp = np.cumsum(self.exposure)[idx] - self.exposure[idx]*frac
+        csexp = np.cumsum(self.sexposure)[idx] - self.sexposure[idx]*frac
+        cbexp = np.cumsum(self.bexposure)[idx] - self.bexposure[idx]*frac
+
+        if deadtime_too:
+            deadtime = (TSTOP-TSTART)-self.LIVETIME
+            cdead = np.cumsum(deadtime)[idx]-deadtime[idx]*frac
+        else:
+            cdead = None
+
+        if not cumulative:
+            cexp = cexp[1:]-cexp[:-1]
+            csexp = csexp[1:]-csexp[:-1]
+            cbexp = cbexp[1:]-cbexp[:-1]
+            if cdead is not None:
+                cdead = cdead[1:]-cdead[:-1]
+
+        return cexp,csexp,cbexp,cdead
 
     def get_deadtime(self,times):
         """ Return the cumulative deadtime at the provided times."""
-        return self.get_exposure(time,deadtime_too=True)[1]
+        return self.get_exposure(time,deadtime_too=True)[-1]
 
     def get_contiguous_exposures(self,tstart=None,tstop=None,
             max_interval=10):
@@ -1883,7 +1941,7 @@ class Data(object):
         times[0] = tstart
         times[-1] = tstop
         times[1:-1] = ti
-        exposure = self.get_exposure(times)
+        exposure = self.get_exposure(times)[0]
 
         # now, calculate the exposure at the mid-points
         mp_exposure = 0.5*(exposure[1:]+exposure[:-1])
@@ -1927,17 +1985,17 @@ class Data(object):
 
         # now just need to compute exposure; this can be done just by
         # tweaking the times above, but let's just make it easy for now
-        exposure = self.get_exposure(cell_stops) - self.get_exposure(cell_starts)
+        exposure = self.get_exposure(cell_stops)[0] - self.get_exposure(cell_starts)[0]
 
         # there should now be a 1-1 mapping between tstart, tstop,
         # photon times, photon weights, and exposures
         return list(map(Cell,cell_starts,cell_stops,exposure*(self.S/self.E),ti,self.we[event_idx0:event_idx1],[self.S/self.B]*len(cell_starts)))
 
     def get_cells(self,tstart=None,tstop=None,tcell=None,
-            snap_edges_to_exposure=False,trim_zero_exposure=True,
+            trim_zero_exposure=True,
             time_series_only=False,use_barycenter=True,
-            randomize=False,seed=None,scale=None,
-            scale_series=None,source_scaler=None,
+            randomize=False,seed=None,
+            src_scaler=None,bkg_scaler=None,src_injector=None,
             minimum_exposure=3e4,minimum_fractional_exposure=0,
             quiet=False):
         """ Return the starts, stops, exposures, and photon data between
@@ -1945,70 +2003,76 @@ class Data(object):
             of length tcell (s).  Otherwise, return photon-based cells.
 
             Parameters
-            ---------
-
-            snap_edges_to_exposure -- move the edges of the returned cells
-                to align with the resolution of the underlying FT2 file; 
-                this basically cuts out dead time, and is potentially
-                useful if tcell is a few hours or less. [NOT IMPLEMENTED]
-
-            trim_zero_exposure -- remove Cells that have 0 exposure.  good
+            ----------
+            trim_zero_exposure : remove Cells that have 0 exposure.  good
                 for things like Bayesian Block analyses, VERY BAD for
                 frequency-domain analyses!
 
-            time_series_only -- don't return Cells, but a list of time
+            time_series_only : don't return Cells, but a list of time
                 series: starts, stops, exposure, cts, sum(weights), 
                 sum(weights^2)
 
-            use_barycenter -- interpret tcell in barycenter frame, so
+            use_barycenter : interpret tcell in barycenter frame, so
                 generate a set of nonuniform edges in the topocenter and
                 use this for binning/exposure calculation; NB that in
                 general one would *not* use barycentered event times
-                in this case.  ALSO note that this calculation is approx.
-                because it (almost always) assumes that the S/C is at the
-                geocenter, so will be out by up to 40ms.
+                in this case.
 
-            randomize -- shuffle times and weights so that they follow
+                **NB** This calculation will be off by up to 40ms 
+                because it assumes that the S/C is at the geocenter.
+
+            randomize : shuffle times and weights so that they follow
                 the exposure but lose all time ordering; useful for
                 exploring null cases
 
-            seed -- [None] random seed to use (see np.random.default_rng)
+            seed : [None] random seed to use (see np.random.default_rng)
 
-            scale -- apply a single rescaling weight
+            src_scaler : a function which can takes METs (topo) of the
+                start and stop of the exposure/other interval, giving the
+                average source scale over that interval.  This will be 
+                applied both to the exposure and to the weights:
 
-            scale_series -- a series of rescaling weights; the format
-                should be passed as a tuple (edges,scales) with the edges
-                giving the boundaries of the time interval of scale
-                validity; these should be contiguous.  Times in MET.
+                w' = a*w / (a*w + b*(1-w)),
 
-                This is useful for analyses like Cygnus X-3, where there
+                where a,b are the source and background scales for the
+                weights.
+
+                The intent for src_scaler and bkg_scaler is to "redo"
+                the weights computation as if we had known about the 
+                variability originally.  This is exact for the source
+                (with the restriction to a constant spectrum) but only
+                approximate for the background, since the individual source
+                contributions have been summed up.
+
+                One example application is Cygnus X-3, where there
                 is overall "slow" source variation and a fast (orbital)
                 periodicity.  Scaling so that the weights account for the
                 slow variation (enhancing the times when it is on) improves
                 the periodicity sensitivity.
+                
+            bkg_scaler : as src_scaler, but will rescale the "background"
+                sources, viz. those represented by the complement of the
+                weights
 
-            minimum_exposure -- this is the minimum exposure, scaled by
-                tcell/30.  Only applied if time_series_only.
-                [To be confirmed: possibly also just set to 0.  I don't
-                see why we would necessarily want to add another cut here.]
+                Generally, one would use this to suppress variations from
+                background sources.
+
+            src_injector : as src_scaler/bkg_scaler, but the intention is
+                to inject a signal without changing the underlying weights
+                or exposure.  If provided, the source exposure will be
+                temporarily adjusted and the weights will be restributed
+                according to the updated source/bkg distributions.
+
+                *** NB -- currently, unlike src/bkg_scaler, the argument
+                to src_injector is expected to be barycentric.
+                Generally this is kindof a mess...
+                ***
 
             minimum_fractional_exposure -- reject cells whose exposure
                 is less than this fraction of the mean exposure of all of
                 the cells.  Only valid when tcell is specified.  Use with
                 care if using short (e.g. <1d) tcell, as the intrinsic
                 exposure variation becomes large.
-
-            source_scaler -- a function which will take MET and give
-                a scaling factor.  This is applied to each exposure
-                interval, and the weights are re-distributed according to
-                the re-scaled exposure.  NB that for each event, a random
-                number is chosen such that the event is assigned to the
-                background, in which case it follows the exposure, or to
-                the source, in which case it follows the scaled exposure.
-                This allows for the injection of a signal into the data.  
-                It also removes any original signal because the weights are
-                fully shuffled according to the exposure.  A uniform 
-                rescale is equivalent to randomize=True.
 
         """
         ft1_is_bary = self.timeref == 'SOLARSYSTEM'
@@ -2029,18 +2093,8 @@ class Data(object):
             print('Will clip to MET=%.2f.'%(self.TSTOP[-1]))
             tstop = self.TSTOP[-1]
 
-        if scale_series is not None:
-            # make scale_series consistent with start and stop time
-            tstart = max(scale_series[0][0],tstart)
-            tstop = min(scale_series[0][-1],tstop)
-            mask = (scale_series[0][1:] > tstart) & (scale_series[0][:-1] < tstop)
-            new_edges = scale_series[0][:-1][mask]
-            new_edges = np.append(new_edges,scale_series[0][1:][mask][-1])
-            new_scales = scale_series[1][mask]
-            scale_series = [new_edges,new_scales]
-
         if use_barycenter:
-            tstart,tstop = bary.met2tdb([tstart,tstop],self.ra,self.dec)
+            tstart,tstop = self._topo2bary([tstart,tstop])
 
         if tcell is None:
             return self.get_photon_cells(tstart,tstop)
@@ -2051,24 +2105,29 @@ class Data(object):
             ncell = 1
 
         edges = tstart + np.arange(ncell+1)*tcell
+        assert(edges[-1] <= tstop)
         if use_barycenter:
             topo_edges = self._bary2topo(edges)
+            assert(abs(topo_edges[0]-self.TSTART[0])<1e-6)
+            topo_edges[0] = self.TSTART[0] # fix tiny numerical error
+            assert(topo_edges[-1] <= self.TSTOP[-1])
             bary_edges = edges
         else:
             topo_edges = bary_edges = edges
+        self._topo_edges = topo_edges.copy()
+
+        # apply scales if provided
+        ov = self.apply_scalers(
+                src_scaler=src_scaler,bkg_scaler=bkg_scaler)
 
         # always use topocentric times to manage the exposure calculation
-        self._topo_edges = topo_edges.copy()
-        cexp,dead = self.get_exposure(topo_edges,deadtime_too=True)
-        exp = (cexp[1:] - cexp[:-1])
-        dead = (dead[1:]-dead[:-1])
-        if snap_edges_to_exposure:
-            raise NotImplementedError
+        exp,sexp,bexp,dead = self.get_exposure(
+                topo_edges,deadtime_too=True,cumulative=False)
+
+        if ft1_is_bary:
+            starts,stops = bary_edges[:-1],bary_edges[1:]
         else:
-            if ft1_is_bary:
-                starts,stops = bary_edges[:-1],bary_edges[1:]
-            else:
-                starts,stops = topo_edges[:-1],topo_edges[1:]
+            starts,stops = topo_edges[:-1],topo_edges[1:]
 
         # trim off any events that come outside of first/last cell
         istart,istop = np.searchsorted(self.ti,[starts[0],stops[-1]])
@@ -2076,10 +2135,13 @@ class Data(object):
         weights = self.we[istart:istop]
 
         if minimum_fractional_exposure > 0:
-            if randomize or (source_scaler is not None):
-                print("Warning!  Using minimum_fractional_exposure>0 with randomize or source_scaler is not tested, probably not supported.")
+            if randomize:
+                print("Warning!  Using minimum_fractional_exposure>0 with randomize is not tested, probably not supported.")
             frac_exp = exp/exp[exp>0].mean()
-            exp[frac_exp < minimum_fractional_exposure] = 0
+            m = frac_exp < minimum_fractional_exposure
+            exp[m] = 0
+            sexp[m] = 0
+            bexp[m] = 0
 
         if trim_zero_exposure:
             exposure_mask = exp > 0
@@ -2091,39 +2153,37 @@ class Data(object):
             starts = starts[exposure_mask]
             stops = stops[exposure_mask]
             exp = exp[exposure_mask]
+            sexp = sexp[exposure_mask]
+            bexp = bexp[exposure_mask]
             dead = dead[exposure_mask]
         else:
             exposure_mask = slice(0,len(starts))
 
-        scales = None
-        if randomize:
-            scales = 1.
-        if source_scaler is not None:
-            # NB -- exposure in topocentric time, but flux scaling in bary
-            bstarts,bstops = bary_edges[:-1],bary_edges[1:]
-            #bstarts,bstops = starts,stops
-            scales = source_scaler(bstarts,bstops)
+        if src_injector is not None:
+            randomize = True
 
-        if scales is not None:
-            # Redistribute the weights:
-            # (1) background events follow the exposure
-            # (2) source events follow the scaled exposure
+        if randomize:
+            # Redistribute the weights according to the (possibly rescaled)
+            # source and background exposures
+
+            if src_injector is not None:
+                csexp = np.cumsum(
+                        src_injector(bary_edges[:-1],bary_edges[1:])*sexp)
+            else:
+                csexp = np.cumsum(sexp)
+            csexp *= 1./csexp[-1]
+            cbexp = np.cumsum(bexp)
+            cbexp *= 1./cbexp[-1]
 
             rng = np.random.default_rng(seed)
-            mask = rng.random(len(times)) >= weights
-            rv = rng.random(len(times))
-            
-            # Form cumulative distributions for background and source
-            _bexp = np.cumsum(exp)
-            _bexp *= 1./_bexp[-1]
-            _sexp = np.cumsum(exp*scales)
-            _sexp *= 1./_sexp[-1]
+            mask = rng.random(len(times)) >= weights # bkg events
+            rv = rng.random(len(times)) # random insertion points
 
             # Insert the weights randomly following the distributions
             indices = np.empty(len(times),dtype=int)
-            indices[mask] = np.searchsorted(_bexp,rv[mask])
+            indices[mask] = np.searchsorted(cbexp,rv[mask])
             mask = ~mask
-            indices[mask] = np.searchsorted(_sexp,rv[mask])
+            indices[mask] = np.searchsorted(csexp,rv[mask])
 
             a = np.argsort(indices)
             times = times[a]
@@ -2136,36 +2196,6 @@ class Data(object):
 
         nweights = np.bincount(event_idx,minlength=len(starts))
 
-        # rescale the weights
-        if scale_series is not None:
-            # search right edges
-            edges,scales = scale_series
-            right_edges = edges[1:]
-            # adjust weights
-            W0 = weights.sum()
-            Wb0 = (1-weights).sum()
-            idx = np.searchsorted(right_edges,times)
-            scale = scales[idx]
-            weights = scale*weights/(scale*weights+(1-weights))
-            W1 = weights.sum()
-            Wb1 = (1-weights).sum()
-            # adjust exposure
-            idx = np.searchsorted(right_edges,stops)
-            sexp = (exp * scales[idx])*(self.S/self.E)
-            # set overall scale; for now, assume that the scale series
-            # is averaged to 1;  Need to be more sophisticated if we want
-            # to get sub-intervals (e.g. use tstart/tstop to match edges)
-            #scale = np.average(scales,weights=edges[1:]-edges[:-1])
-            #print scale
-        elif (scale is not None):
-            weights = scale*weights/(scale*weights+(1-weights))
-            sexp = exp*(scale*self.S/self.E)
-        else:
-            sexp = exp*(self.S/self.E)
-
-        # for now, just let background be scale free
-        bexp = exp*(self.B/self.E)
-
         # now that exposure and event selection are done in topocentric,
         # if we're using barycentering, replace the bin edges with the
         # correct (uniform) barycentric times;
@@ -2173,6 +2203,9 @@ class Data(object):
             # replace starts/stops with barycenter times
             starts = bary_edges[:-1][exposure_mask]
             stops = bary_edges[1:][exposure_mask]
+
+        # restore the weights/exposure if we had been using src/bkg_scaler
+        self.revert_scalers(ov)
 
         # AHAH -- this is broken when the weights have been re-shuffled
         # Needs to obey event_idx, so probably back to the slow mode
@@ -2184,7 +2217,6 @@ class Data(object):
             W2 = np.append(0,np.cumsum(weights.astype(np.float128)**2))
             weights_vec = (W1[idx[1:]]-W1[idx[:-1]]).astype(float)
             weights2_vec = (W2[idx[1:]]-W2[idx[:-1]]).astype(float)
-            #minimum_exposure = minimum_exposure*(tcell/30)
             if use_barycenter:
                 return CellTimeSeries(
                     starts,stops,exp,sexp,bexp,
@@ -2197,17 +2229,14 @@ class Data(object):
                     starts,stops,exp,sexp,bexp,
                     nweights,weights_vec,weights2_vec,dead,
                     timesys='topocentric',minimum_exposure=0)
-        # NB this hasn't been updated to properly incorporate the flexible
-        # (time-dependent) scale!  So raise an error if that's used.
-        if scale_series is not None:
-            raise NotImplementedError("Scale series only supported for CellTimeSeries right now.")
+
         cells = deque()
         idx = 0
-        SonB = self.S/self.B*(scale or 1)
         for i in range(len(starts)):
             t = times[idx:idx+nweights[i]]
             w = weights[idx:idx+nweights[i]]
             idx += nweights[i]
+            SonB = sexp[i]/bexp[i]
             c = Cell(starts[i],stops[i],sexp[i],t.copy(),w.copy(),SonB)
             cells.append(c)
         return list(cells)
@@ -2286,6 +2315,44 @@ class Data(object):
         return self.get_cells_from_time_intervals(starts,stops,
                 randomize=randomize,seed=seed)
 
+    def apply_scalers(self,src_scaler=None,bkg_scaler=None):
+        """ Apply permanent changes to the underlying exposure and weights.
+        """
+        if (src_scaler is None) and (bkg_scaler is None):
+            return
+
+        if self.sexposure is None:
+            self.sexposure = self.exposure * (self.S / self.E)
+        if self.bexposure is None:
+            self.bexposure = self.exposure * (self.B / self.E)
+
+        original_values = (self.we,
+                self.sexposure.copy(),self.bexposure.copy())
+
+        sscl = bscl = 1.
+        if src_scaler is not None:
+            self.sexposure *= src_scaler(self.TSTART,self.TSTOP)
+            sscl = src_scaler(self.ti)
+        if bkg_scaler is not None:
+            self.bexposure *= bkg_scaler(self.TSTART,self.TSTOP)
+            bscl = bkg_scaler(self.ti)
+
+        self.we = sscl*self.we / (sscl*self.we + bscl*(1-self.we))
+
+        return original_values
+
+    def revert_scalers(self,original_values):
+        """ Just a convenience method for undoing apply_scalers.
+        """
+        if original_values is None:
+            return
+        we,sexp,bexp = original_values
+        self.we = we
+        self.sexposure = sexp
+        self.bexposure = bexp
+
+
+
 
 class PhaseData(Data):
     """ Use phase instead of time, and ignore exposure.
@@ -2296,7 +2363,6 @@ class PhaseData(Data):
             ra=None,dec=None):
         """ The FT1 files
             ra, dec of source (deg)
-            weight_cut -- fraction of source photons to retain
             max_radius -- maximum photon separation from source [deg]
         """
         print('WARNING! This class is probably out of date.')
@@ -2814,6 +2880,7 @@ def get_orbital_modulation(ts,freqs):
         sph = np.sin(ph)
         a = np.mean(cph*y)
         b = np.mean(sph*y)
+        print(a,b)
         a2 = np.mean(cph**2*ts.weights2)
         b2 = np.mean(sph**2*ts.weights2)
         rvals += 2*(a*cph + b*sph)

@@ -6,6 +6,7 @@ from astropy import coordinates as coord
 from astropy import time
 from astropy import units as u
 import numpy as np
+from scipy.interpolate import RegularGridInterpolator
 
 def met2mjd(times,mjdref=51910+7.428703703703703e-4):
     times = np.asarray(times,dtype=np.float128)
@@ -44,6 +45,38 @@ def met2tdb(met,ra,dec):
     delay = spos@cpos/const.c # (3,1) x (3,N)
     tdbs = times.tdb + time.TimeDelta(delay,scale='tdb')
     return mjd2met(tdbs.mjd)
+
+def _bary_interpolator(met_start,met_stop,ra,dec,ngrid=1200,tobary=True):
+    slop = 10*86400
+    # adding this buffer is primarily to prevent "ringing" from the cubic
+    # interpolation at the edges, but it should also improve downstream
+    # experience by preventing out-of-range errors
+    tgrid = np.linspace(met_start-slop,met_stop+slop,ngrid)
+    bgrid = met2tdb(tgrid,ra,dec)
+    if tobary:
+        rgi = RegularGridInterpolator([tgrid],bgrid-tgrid,method='cubic')
+    else:
+        rgi = RegularGridInterpolator([bgrid],tgrid-bgrid,method='cubic')
+    def func(met):
+        met = np.atleast_1d(met)
+        rvals = met + rgi(met)
+        return np.squeeze(rvals)
+    return func
+
+def tobary_interpolator(met_start,met_stop,ra,dec):
+    """ Build an interpolator which will return MET(TDB) over the
+    specified time range.  The default settings will provide <1ms error over
+    a 15-year timespan, i.e. are suitable for typical LAT anaylsis.
+    """
+    return _bary_interpolator(met_start,met_stop,ra,dec,tobary=True)
+
+def totopo_interpolator(met_start,met_stop,ra,dec):
+    """ Build an interpolator which will return MET(topo) over the
+    specified time range.  The default settings will provide <1ms error over
+    a 15-year timespan, i.e. are suitable for typical LAT anaylsis.
+    """
+    return _bary_interpolator(met_start,met_stop,ra,dec,tobary=False)
+
 
 def test():
     """ NB this requires v2.0 or earlier of fermitools.
