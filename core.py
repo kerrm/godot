@@ -34,6 +34,87 @@ def infer_met(time):
         return mjd2met(time)
     return time
 
+def calc_weighted_aeff(pcosines,phi,base_spectrum=None,
+        ltfrac=None,correct_psf=True,
+        use_psf_types=True,type_selector=None,emin=100,emax=1e5,
+        verbosity=2):
+    """ Compute the "effective effective area" for a set of exposure
+    segments, typically the ~30s intervals tabulated in an FT2 files.
+
+    Typically, this will involve averaging the effective area over the
+    energy range.  Additionally, by default, the finite aperture size
+    will be taken into account by computing the fraction of the PSF
+    contained at each energy slice.
+
+    Parameters
+    ----------
+    pcosines : the polar angle cosines, vz. cos(theta)
+    phi : azimuthal angle (radians); if not None, then the azimuthal
+        dependence of the effective area will be applied
+    base_spectrum : a function returning dN/dE(E) for the source; if None,
+        will use an E^-2 weighting
+    ltfrac : a livetime fraction entry for each interval. If not None,
+        will apply the efficiency correction to the aeff
+    correct_psf : scale the effective area by the fraction of the PSF
+        contained at the energy slice
+    type_selector : an instance of PSFTypeSelector, e.g., which will
+        give an energy-dependent event type selection.  Those events
+        which are not selected will be omitted from the effective area
+        sum.
+    use_psf_types : event types are PSF types; otherwise, front/back
+    emin : minimum energy of integration (MeV)
+    emax : maximum energy of integration (MeV)
+    """
+
+    emin = np.log10(emin)
+    emax = np.log10(emax)
+    ea = py_exposure_p8.EffectiveArea()
+    if correct_psf:
+        pc = py_exposure_p8.PSFCorrection()
+    else:
+        pc = None
+    if ltfrac is not None:
+        ec = py_exposure_p8.EfficiencyCorrection()
+    else:
+        ec = None
+    if use_psf_types:
+        event_types = [f'PSF{i}' for i in range(4)]
+        event_codes = range(0,4)
+    else:
+        event_types = ['FRONT','BACK']
+        event_codes = range(0,2)
+
+    if base_spectrum is None:
+        base_spectrum = lambda E: E**-2
+
+    # try to pick something like 8/decade
+    nbin = int(round((emax-emin)*8))+1
+    edom = np.logspace(emin,emax,nbin)
+    wts = base_spectrum(edom)
+    # this is the exposure as a function of energy
+    total_exposure = np.empty_like(edom)
+    rvals = np.zeros([len(edom),len(pcosines)])
+    for i,(en,wt) in enumerate(zip(edom,wts)):
+        for etype,ecode in zip(event_types,event_codes):
+            if type_selector is not None:
+                # check to see if we are using this en/ct
+                if not type_selector.accept(en,ecode):
+                    if verbosity >= 2:
+                        print(f'Skipping {en:.2f},{ecode}.')
+                    continue
+            aeff = ea(en,pcosines,etype,phi=phi)
+            if pc is not None: # PSF correction
+                aeff *= pc(en,pcosines,etype)
+            if ec is not None: # efficiency correction
+                aeff *= ec(en,ltfrac,etype)
+            rvals[i] += aeff
+        total_exposure[i] = rvals[i].sum()
+        rvals[i] *= wt
+    aeff = simps(rvals,edom,axis=0)/simps(wts,edom)
+
+    return aeff,edom,total_exposure
+
+
 class PSFTypeSelector():
     """ Select event types as a function of energy.  This is used for
         selecting events and for computing the weighted effective area.
@@ -161,6 +242,39 @@ class CellTimeSeries(object):
         self.minimum_exposure = minimum_exposure
         mask = ~(exp > minimum_exposure)
         self._zero_weight(mask)
+
+    def save(self,fname,compress=True):
+        keys = ['starts','stops','exp','sexp','bexp','counts','weights',
+                'weights2','deadtime']
+        if self.alt_starts is not None:
+            keys += ['alt_starts']
+        if self.alt_stops is not None:
+            keys += ['alt_stops']
+        d = dict()
+        for key in keys:
+            d[key] = getattr(self,key)
+        d['metadata'] = [str(self.minimum_exposure),self.timesys]
+        if compress:
+            np.savez_compressed(fname,**d)
+        else:
+            np.savez(fname,**d)
+
+    @staticmethod
+    def load(fname):
+        q = np.load(fname)
+        minimum_exposure = float(q['metadata'][0])
+        timesys = q['metadata'][1]
+        alt_starts = alt_stops = None
+        if 'alt_starts' in q.keys():
+            alt_starts = q['alt_starts']
+        if 'alt_stops' in q.keys():
+            alt_stops = q['alt_stops']
+        keys = ['starts','stops','exp','sexp','bexp','counts','weights',
+                'weights2','deadtime']
+        args = [q[key] for key in keys]
+        kwargs = dict(alt_starts=alt_starts,alt_stops=alt_stops,timesys=timesys,minimum_exposure=minimum_exposure)
+        q.close()
+        return CellTimeSeries(*args,**kwargs)
 
     def _zero_weight(self,mask):
         self.exp[mask] = 0
@@ -1412,7 +1526,7 @@ class PhaseCellsLogLikelihood(CellsLogLikelihood):
 class Data(object):
 
     def __init__(self,ft1files,ft2files,ra,dec,weight_col,
-            zenith_cut=90,theta_cut=0.4,minimum_exposure=3e4,use_phi=True,
+            zenith_cut=100,theta_cut=0.4,minimum_exposure=3e4,use_phi=True,
             base_spectrum=None,max_radius=None,bary_ft1files=None,
             tstart=None,tstop=None,
             verbosity=1,correct_efficiency=True,correct_cosines=True,
@@ -1462,6 +1576,8 @@ class Data(object):
         self.ft1files = ft1files
         self.ft2files = ft2files
         self.max_radius = max_radius
+        self.zenith_cut = zenith_cut
+        self.theta_cut = theta_cut
         self.ra,self.dec = ra,dec
         self._verbosity = verbosity
 
@@ -1502,11 +1618,12 @@ class Data(object):
         # TODO -- OK, here is where we want to put the PSFType selector
         # can actually make it general and take 0-3 or 0-1 depending on
         # the types being used
-        aeff,texp_edom,texp = self._get_weighted_aeff(
+        aeff,texp_edom,texp = calc_weighted_aeff(
                 pcosines,phi,
                 base_spectrum=base_spectrum,ltfrac=ltfrac,
                 correct_psf=correct_psf,use_psf_types=use_psf_types,
-                emin=emin,emax=emax,type_selector=type_selector)
+                emin=emin,emax=emax,type_selector=type_selector,
+                verbosity=verbosity)
 
         self.total_exposure_edom = texp_edom
         self.total_exposure = texp
@@ -1568,7 +1685,7 @@ class Data(object):
         # time-dependent modifications
         S = self.S = np.sum(self.we)
         B = self.B = len(self.we) - S
-        E = self.E = np.sum(self.E)
+        E = self.E = np.sum(self.exposure)
         self.sexposure = None
         self.bexposure = None
 
@@ -1609,83 +1726,6 @@ class Data(object):
         if not 'bexposure' in state:
             state['bexposure'] = None
         self.__dict__.update(state)
-
-    def _get_weighted_aeff(self,pcosines,phi,base_spectrum=None,
-            ltfrac=None,correct_psf=True,
-            use_psf_types=True,type_selector=None,emin=100,emax=1e5):
-        """ Compute the "effective effective area" for the data selection.
-
-        Typically, this will involve averaging the effective area over the
-        energy range.  Additionally, by default, the finite aperture size
-        will be taken into account by computing the fraction of the PSF
-        contained at each energy slice.
-
-        Parameters
-        ----------
-        pcosines : the polar angle cosines, vz. cos(theta)
-        phi : azimuthal angle (radians); if not None, then the azimuthal
-            dependence of the effective area will be applied
-        base_spectrum : if None, will use an E^-2 weighting; otherwise,
-            a function returning dN/dE(E)
-        ltfrac : a livetime fraction entry for each interval. If not None,
-            will apply the efficiency correction to the aeff
-        correct_psf : scale the effective area by the fraction of the PSF
-            contained at the energy slice
-        type_selector : an instance of PSFTypeSelector, e.g., which will
-            give an energy-dependent event type selection.  Those events
-            which are not selected will be omitted from the effective area
-            sum.
-        use_psf_types : event types are PSF types; otherwise, front/back
-        emin : minimum energy of integration (MeV)
-        emax : maximum energy of integration (MeV)
-        """
-
-        emin = np.log10(emin)
-        emax = np.log10(emax)
-        ea = py_exposure_p8.EffectiveArea()
-        if correct_psf:
-            pc = py_exposure_p8.PSFCorrection()
-        else:
-            pc = None
-        if ltfrac is not None:
-            ec = py_exposure_p8.EfficiencyCorrection()
-        else:
-            ec = None
-        if use_psf_types:
-            event_types = [f'PSF{i}' for i in range(4)]
-            event_codes = range(0,4)
-        else:
-            event_types = ['FRONT','BACK']
-            event_codes = range(0,2)
-
-        if base_spectrum is None:
-            base_spectrum = lambda E: E**-2
-
-        # try to pick something like 8/decade
-        nbin = int(round((emax-emin)*8))+1
-        edom = np.logspace(emin,emax,nbin)
-        wts = base_spectrum(edom)
-        # this is the exposure as a function of energy
-        total_exposure = np.empty_like(edom)
-        rvals = np.zeros([len(edom),len(pcosines)])
-        for i,(en,wt) in enumerate(zip(edom,wts)):
-            for etype,ecode in zip(event_types,event_codes):
-                if type_selector is not None:
-                    # check to see if we are using this en/ct
-                    if not type_selector.accept(en,ecode):
-                        self._vprint(f'Skipping {en:.2f},{ecode}.',2)
-                        continue
-                aeff = ea(en,pcosines,etype,phi=phi)
-                if pc is not None: # PSF correction
-                    aeff *= pc(en,pcosines,etype)
-                if ec is not None: # efficiency correction
-                    aeff *= ec(en,ltfrac,etype)
-                rvals[i] += aeff
-            total_exposure[i] = rvals[i].sum()
-            rvals[i] *= wt
-        aeff = simps(rvals,edom,axis=0)/simps(wts,edom)
-
-        return aeff,edom,total_exposure
 
     def _load_photons(self,ft1files,weight_col,tstart,tstop,
             max_radius=None,time_col='time',no_filter=False,

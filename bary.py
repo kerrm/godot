@@ -16,14 +16,58 @@ def mjd2met(times,mjdref=51910+7.428703703703703e-4):
     times = np.asarray(times,dtype=np.float128)
     return (times-mjdref)*86400
 
-def met2tdb(met,ra,dec):
-    """ Return approximate METs corrected to the solar system barycenter.
+def _Time2tdb(times,ra,dec):
+    """ Perform time correcton to solar system barycenter.
 
     This method IGNORES spacecraft position, so it is not intended for
     high precision work.
 
     It uses the default astropy ephemeris (DE405) which is certainly good
     enough for this.
+
+    Parameters
+    ----------
+    times : an astropy.time.Time object(s)
+    ra : position to barycenter (deg)
+    dec : position to barycenter (deg)
+
+    Returns
+    -------
+    met(tdb) : time(s) corrected to SSB, in TDB, referenced to Fermi epoch
+    """
+    times = np.atleast_1d(times)
+    zero = np.full(len(times),0)
+    gcrs = coord.GCRS(zero*u.deg,zero*u.deg,zero*u.m,obstime=times)
+    cpos = gcrs.transform_to(coord.ICRS()).cartesian.xyz
+    sky = coord.SkyCoord(ra*u.deg,dec*u.deg)
+    spos = sky.icrs.represent_as(coord.UnitSphericalRepresentation).represent_as(coord.CartesianRepresentation).xyz
+    delay = spos@cpos/const.c # (3,1) x (3,N)
+    tdbs = times.tdb + time.TimeDelta(delay,scale='tdb')
+    return np.squeeze(tdbs)
+
+def mjd2tdb(mjd,ra,dec,scale='tai'):
+    """ Return approximate MJDs corrected to the solar system barycenter.
+
+    See further notes on _Time2tdb.
+
+    Parameters
+    ----------
+    met : this is MJD, in the frame as noted
+    ra : position to barycenter (deg)
+    dec : position to barycenter (deg)
+
+    Returns
+    -------
+    mjd(tdb) : time(s) corrected to SSB, in TDB
+    """
+    times = time.Time(mjd,format='mjd',scale=scale)
+    tdbs = _Time2tdb(times,ra,dec)
+    return tdbs.mjd
+
+def met2tdb(met,ra,dec):
+    """ Return approximate METs corrected to the solar system barycenter.
+
+    See further notes on _Time2tdb.
 
     Parameters
     ----------
@@ -35,16 +79,8 @@ def met2tdb(met,ra,dec):
     -------
     met(tdb) : time(s) corrected to SSB, in TDB, referenced to Fermi epoch
     """
-    mjds = met2mjd(met)
-    times = time.Time(mjds,format='mjd',scale='tt')
-    zero = np.full(len(times),0)
-    gcrs = coord.GCRS(zero*u.deg,zero*u.deg,zero*u.m,obstime=times)
-    cpos = gcrs.transform_to(coord.ICRS()).cartesian.xyz
-    sky = coord.SkyCoord(ra*u.deg,dec*u.deg)
-    spos = sky.icrs.represent_as(coord.UnitSphericalRepresentation).represent_as(coord.CartesianRepresentation).xyz
-    delay = spos@cpos/const.c # (3,1) x (3,N)
-    tdbs = times.tdb + time.TimeDelta(delay,scale='tdb')
-    return mjd2met(tdbs.mjd)
+    tdbs = mjd2tdb(met2mjd(met),ra,dec,scale='tt')
+    return mjd2met(tdbs)
 
 def _bary_interpolator(met_start,met_stop,ra,dec,ngrid=1200,tobary=True):
     slop = 10*86400
