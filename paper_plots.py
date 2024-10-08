@@ -4,7 +4,11 @@ from scipy.stats import chi2,norm
 
 from . import core
 from .core import mjd2met,met2mjd
-from .load_data import get_data
+from .load_data import data_path,get_data
+from .scalers import PiecewiseScaler
+
+from importlib import reload
+reload(core)
 
 def set_rcParams(ticklabelsize='medium',bigticks=False):
     import matplotlib
@@ -39,8 +43,7 @@ def set_rcParams(ticklabelsize='medium',bigticks=False):
     #matplotlib.font_manager.warnings.filterwarnings(
         #'once',message='not found')
 
-# THIS IS FIGURE 1
-# a 1-day resolution light curve for Geminga
+# THIS IS FIGURE 1 # a 1-day resolution light curve for Geminga
 def make_geminga_plot_first(data=None,ax=None,pulls_ax=None):
     if data is None:
         data = get_data('j0633',clobber=False)
@@ -48,13 +51,15 @@ def make_geminga_plot_first(data=None,ax=None,pulls_ax=None):
             minimum_fractional_exposure=0.1)
     clls_1d = core.CellsLogLikelihood(cells_1d,profile_background=False)
 
-    rvals_1d = clls_1d.get_lightcurve(tsmin=9)
+    rvals_1d = clls_1d.get_raw_lightcurve(tsmin=9)
 
     if ax is None:
         pl.figure(1); pl.clf()
-        pl.subplots_adjust(hspace=0,bottom=0.12,left=0.10,right=0.98,top=0.98)
+        pl.subplots_adjust(
+                hspace=0,bottom=0.12,left=0.10,right=0.98,top=0.98)
         ax = pl.subplot(1,1,1)
-    core.plot_clls_lc(rvals_1d,ax,scale='linear')
+    core.plot_raw_lc(rvals_1d,ax,scale='linear')
+
     if pulls_ax is None:
         return
 
@@ -62,10 +67,11 @@ def make_geminga_plot_first(data=None,ax=None,pulls_ax=None):
     # "pulls" for the points, i.e. the error-weighted residuals
     pulls_ax.clear()
     pl.subplots_adjust(hspace=0,bottom=0.12,left=0.10,right=0.98,top=0.98)
-    y = rvals_1d[:,2]
-    ye = np.where(y<1,rvals_1d[:,4],rvals_1d[:,3])
-    ul = rvals_1d[:,-1] == -1
-    pulls = ((y-1)/ye)[~ul]
+    x,xerr,y,yerrlo,yerrhi,ts = rvals_1d.transpose()
+    #ye = np.where(y<1,yerrhi,yerrlo)
+    ye = 0.5*(yerrhi+yerrlo)
+    ul = yerrhi == -1
+    pulls = (y[~ul]-1)/ye[~ul]
     print(np.abs(pulls).max(),len(pulls))
     pulls_ax.hist(pulls,histtype='step',bins=np.linspace(-5,5,51),density=True,lw=2);
     dom = np.linspace(-5,5,1001)
@@ -75,15 +81,15 @@ def make_geminga_plot_first(data=None,ax=None,pulls_ax=None):
     pulls_ax.axis([-5,5,1e-6,1])
 
 # THIS IS FIGURE 2
-def make_new_3c279_figure(fignum=1):
+def make_new_3c279_figure(data=None,fignum=2):
     """ Make version with six panels showing with and without the bkg
         estimator.  For the revised version of the paper.
     """
     tstart = tstop = None
     profile_background = False
-    fignum=2
 
-    data = get_data('3c279',clobber=False)
+    if data is None:
+        data = get_data('3c279',clobber=False)
     cells_1d =  data.get_cells(tcell=86400,use_barycenter=False,
             tstart=tstart,tstop=tstop,minimum_fractional_exposure=0.3)
     clls_1d = core.CellsLogLikelihood(cells_1d,
@@ -92,8 +98,8 @@ def make_new_3c279_figure(fignum=1):
     clls_1dp = core.CellsLogLikelihood(cells_1d,
             profile_background=True)
 
-    rvals_1d,allts = clls_1d.get_lightcurve(tsmin=9,get_ts=True)
-    rvals_1dp,alltsp = clls_1dp.get_lightcurve(tsmin=9,get_ts=True)
+    rvals_1d = clls_1d.get_raw_lightcurve(tsmin=9)
+    rvals_1dp = clls_1dp.get_raw_lightcurve(tsmin=9)
 
     a = np.argmin(np.abs(np.asarray([cll.cell.get_tmid() for cll in clls_1d.clls])-mjd2met(56576.6)))
     t = clls_1d.clls[a].get_flux(profile_background=profile_background)
@@ -103,19 +109,19 @@ def make_new_3c279_figure(fignum=1):
     pl.figure(fignum,(8,4.5)); pl.clf()
     pl.subplots_adjust(hspace=0.00,left=0.10,right=0.99,top=0.98,wspace=0.00,bottom=0.12)
     # TODO -- see if we can fix the "Warning, best guess" problems in core.
-    for i in xrange(6):
+    for i in range(6):
         ax = pl.subplot(2,3,i+1)
         if i < 3:
             rvals = rvals_1d
         else:
             rvals = rvals_1dp
         if (i == 0) or (i == 3):
-            core.plot_clls_lc(rvals,ax,scale='log')
+            core.plot_raw_lc(rvals,ax,scale='log')
         elif (i == 1) or (i == 4):
-            core.plot_clls_lc(rvals,ax,scale='log',
+            core.plot_raw_lc(rvals,ax,scale='log',
                     min_mjd=54750-1,max_mjd=55450+1)
         else:
-            core.plot_clls_lc(rvals,ax,scale='log',
+            core.plot_raw_lc(rvals,ax,scale='log',
                     min_mjd=56550-1,max_mjd=57250+1)
         # turn off extra tick labels
         if i%3 != 0:
@@ -137,6 +143,8 @@ def make_new_3c279_figure(fignum=1):
                 ax.set_xticklabels(['']*len(ax.get_xticks()))
             ax.plot([56576.5],[4.63],'o',fillstyle='none',markersize=10,color='C3',ls='--')
             # NB TS = 342
+    allts = rvals_1d[:,-1]
+    alltsp = rvals_1dp[:,-1]
     return allts,alltsp
 
 # THIS IS FIGURE 3
@@ -188,39 +196,35 @@ def make_bb_trials(ntrial=100,fignum=5):
 # THIS IS FIGURE 4
 def make_3c279_plot(data=None,fignum=2,clobber=False):
     """ Model likelihood with waveforms and plot."""
+
     if data is None:
         data = get_data('3c279',clobber=clobber)
+
     tstart,tstop = 57185,57193
+
     cells_orb = data.get_contiguous_exposure_cells(
             tstart=mjd2met(tstart),tstop=mjd2met(tstop))
-    print('%d cells in the orbital time series'%(len(cells_orb)))
     clls_orb = core.CellsLogLikelihood(cells_orb,profile_background=False)
+    print('%d cells in the orbital time series'%(len(cells_orb)))
+
     cells_1d =  data.get_cells(tcell=86400,use_barycenter=False,
             tstart=mjd2met(tstart),tstop=mjd2met(tstop))
     clls_1d = core.CellsLogLikelihood(cells_1d,profile_background=False)
 
-    rvals_orb,rvalsbb_orb = clls_orb.plot_cells_bb(bb_prior=8,plot_raw_cells=True)
-    rvals_1d,rvalsbb_1d = clls_1d.plot_cells_bb(bb_prior=8,no_bb=True)
+    rvals_raw_orb = clls_orb.get_raw_lightcurve()
+    rvals_bb_orb = clls_orb.get_bb_lightcurve(bb_prior=8)
+    rvals_raw_1d = clls_1d.get_raw_lightcurve()
+    rvals_bb_1d = clls_1d.get_bb_lightcurve(bb_prior=8)
 
-    pl.close(fignum)
-    pl.figure(fignum,(3.5,7.5)); pl.clf()
-    pl.subplots_adjust(hspace=0,top=0.98,left=0.16)
+    fig = pl.figure(fignum)
+    fig.clear()
+    fig.set_size_inches(3.5,7.5)
+    pl.subplots_adjust(hspace=0,top=0.99,left=0.17,bottom=0.08,right=0.96)
     ax1 = pl.subplot(3,1,1)
 
-
     # plot the BB orb values as blue points
-    ul_mask = (rvals_orb[:,-1] == -1) & (~np.isnan(rvals_orb[:,-1]))
-    t = rvals_orb[ul_mask].transpose()
-    ax1.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C0',alpha=0.3,ls=' ',ms=3)
-    t = rvals_orb[~ul_mask].transpose()
-    ax1.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',color='C0',alpha=0.3,ls=' ',ms=3)
-
-    # plot the BB orbital values as red points
-    ul_mask = (rvalsbb_orb[:,-1] == -1) & (~np.isnan(rvalsbb_orb[:,-1]))
-    t = rvalsbb_orb[ul_mask].transpose()
-    ax1.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C3',alpha=0.8,ls=' ',ms=5)
-    t = rvalsbb_orb[~ul_mask].transpose()
-    ax1.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',color='C3',alpha=0.8,ls=' ',ms=3)
+    core.plot_raw_lc(rvals_raw_orb,ax1,meas_color='C0',ul_color='C0')
+    core.plot_bb_lc(rvals_bb_orb,ax1)
 
     ax1.axis([tstart,tstop,-2,90])
     ax1.tick_params(labelbottom=False)
@@ -230,18 +234,9 @@ def make_3c279_plot(data=None,fignum=2,clobber=False):
     ax2 = pl.subplot(3,1,2)
 
     # plot the 1-d values as green points
-    ul_mask = (rvals_1d[:,-1] == -1) & (~np.isnan(rvals_1d[:,-1]))
-    t = rvals_1d[ul_mask].transpose()
-    ax2.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C0',alpha=0.3,ls=' ',ms=5)
-    t = rvals_1d[~ul_mask].transpose()
-    ax2.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='s',color='C2',alpha=0.7,ls=' ',ms=5)
+    core.plot_raw_lc(rvals_raw_1d,ax2,ul_color='C0',meas_color='C2')
+    core.plot_bb_lc(rvals_bb_orb,ax2)
 
-    # plot the BB orbital values as red points
-    ul_mask = (rvalsbb_orb[:,-1] == -1) & (~np.isnan(rvalsbb_orb[:,-1]))
-    t = rvalsbb_orb[ul_mask].transpose()
-    ax2.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C3',alpha=0.7,ls=' ',ms=3)
-    t = rvalsbb_orb[~ul_mask].transpose()
-    ax2.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',color='C3',alpha=0.8,ls=' ',ms=3)
     ax2.tick_params(labelbottom=False)
     ax2.set_yticks([0,20,40,60,80])
     ax2.axis([tstart,tstop,-2,90])
@@ -249,25 +244,21 @@ def make_3c279_plot(data=None,fignum=2,clobber=False):
 
     ax3 = pl.subplot(3,1,3)
 
-    # plot the BB orb values as blue points
-    ul_mask = (rvals_orb[:,-1] == -1) & (~np.isnan(rvals_orb[:,-1]))
-    t = rvals_orb[ul_mask].transpose()
-    ax3.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C0',alpha=0.3,ls=' ',ms=3)
-    t = rvals_orb[~ul_mask].transpose()
-    ax3.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',color='C0',alpha=0.3,ls=' ',ms=3)
+    # plot the raw orb values as blue points
+    core.plot_raw_lc(rvals_raw_orb,ax3,ul_color='C0',meas_color='C0')
 
     def waveform_model(p,times):
         """ This is an ad hoc model for a 3C 279 flare, just model it as 3
             gaussians.
         """
         pedestal,p = p[0],p[1:]
-        ngauss = len(p)/3
+        ngauss = len(p)//3
         epochs = p[::3]
         amps = p[1::3]
         widths = p[2::3]
 
         model = np.ones(len(times))*pedestal
-        for i in xrange(ngauss):
+        for i in range(ngauss):
             model += amps[i]*np.exp( -0.5*((times-epochs[i])/widths[i])**2 )
 
         return model
@@ -290,9 +281,6 @@ def make_3c279_plot(data=None,fignum=2,clobber=False):
     # logl = -6920.28
 
 
-
-
-
     ax3.plot(dom,waveform_model(pfinal_3g,dom),ls='-',color='C2',lw=2,
             alpha=0.9)
     ax3.plot(dom,waveform_model(pfinal_4g,dom),ls='-',color='C1',lw=2,
@@ -307,7 +295,7 @@ def make_3c279_plot(data=None,fignum=2,clobber=False):
 # THIS IS FIGURE 5 (left)
 def make_geminga_pulse_profile(fignum=3,add_inset=False):
 
-    data = core.PhaseData(['/data/kerrm/photon_data/J0633+1746_topo.fits'],
+    data = core.PhaseData([f'{data_path}/J0633+1746_topo.fits'],
             'PSRJ0633+1746',pulse_phase_col='PULSE_PHASE',phase_shift=0.05)
 
     cells_100 = data.get_cells(100)
@@ -317,29 +305,19 @@ def make_geminga_pulse_profile(fignum=3,add_inset=False):
     clls_1000 = core.PhaseCellsLogLikelihood(cells_1000)
 
 
-    rvals_100 = clls_100.get_lightcurve(tsmin=9,plot_phase=True)
-    rvalsbb_1000 = clls_1000.get_bb_lightcurve(tsmin=9,plot_phase=True,
-            bb_prior=10)
+    rvals_raw_100 = clls_100.get_raw_lightcurve(tsmin=9)
+    rvals_bb_1000 = clls_1000.get_bb_lightcurve(tsmin=9,bb_prior=10)
 
     pl.close(fignum)
     pl.figure(fignum,(4,4)); pl.clf()
     pl.subplots_adjust(hspace=0,bottom=0.14,top=0.98,left=0.16,right=0.96)
     ax1 = pl.subplot(1,1,1)
 
-
     # plot the bin values as blue points
-    ul_mask = (rvals_100[:,-1] == -1) & (~np.isnan(rvals_100[:,-1]))
-    t = rvals_100[ul_mask].transpose()
-    ax1.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C0',alpha=0.8,ls=' ',ms=3)
-    t = rvals_100[~ul_mask].transpose()
-    ax1.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='s',color='C0',alpha=0.8,ls=' ',ms=3)
+    core.plot_raw_lc(rvals_raw_100,ax1,ul_color='C0',alpha=0.8)
 
     # plot the BB values as red points
-    ul_mask = (rvalsbb_1000[:,-1] == -1) & (~np.isnan(rvalsbb_1000[:,-1]))
-    t = rvalsbb_1000[ul_mask].transpose()
-    ax1.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C3',alpha=0.8,ls=' ',ms=3)
-    t = rvalsbb_1000[~ul_mask].transpose()
-    ax1.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',color='C3',alpha=0.8,ls=' ',ms=3)
+    core.plot_bb_lc(rvals_bb_1000,ax1)
 
     ax1.axis([0,1,0,5.3])
     ax1.set_xticks(np.linspace(0,1,6))
@@ -352,29 +330,22 @@ def make_geminga_pulse_profile(fignum=3,add_inset=False):
     ax2 = pl.axes([0.28,0.75,0.30,0.20])
 
     # plot the bin values as blue points
-    ul_mask = (rvals_100[:,-1] == -1) & (~np.isnan(rvals_100[:,-1]))
-    t = rvals_100[ul_mask].transpose()
-    ax2.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C0',alpha=0.8,ls=' ',ms=3)
-    t = rvals_100[~ul_mask].transpose()
-    ax2.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='s',color='C0',alpha=0.8,ls=' ',ms=3)
+    core.plot_raw_lc(rvals_raw_100,ax2)
 
     # plot the BB values as red points
-    ul_mask = (rvalsbb_1000[:,-1] == -1) & (~np.isnan(rvalsbb_1000[:,-1]))
-    t = rvalsbb_1000[ul_mask].transpose()
-    ax2.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C3',alpha=0.8,ls=' ',ms=3)
-    t = rvalsbb_1000[~ul_mask].transpose()
-    ax2.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',color='C3',alpha=0.8,ls=' ',ms=3)
+    core.plot_bb_lc(rvals_bb_1000,ax2)
 
     ax2.axis([0.7,1,0,0.5])
     ax2.set_xticks([0.7,0.85,1.0])
+    ax2.set_ylabel('')
 
 # THIS IS FIGURE 5 (right)
 def make_j1231_pulse_profile(fignum=4):
 
     ra = 15*(12+31./60 + 11.3133718/3600)
     dec = -(14 + 11./60 + 43.63638 /3600)
-    data = core.PhaseData(['data/J1231-1411_topo.fits'],'PSRJ1231-1411',
-            pulse_phase_col='PULSE_PHASE',phase_shift=0.15,
+    data = core.PhaseData([f'{data_path}/J1231-1411_topo.fits'],
+            'PSRJ1231-1411',phase_shift=0.15,
             max_radius=2,ra=ra,dec=dec)
 
     cells_100 = data.get_cells(100)
@@ -383,29 +354,19 @@ def make_j1231_pulse_profile(fignum=4):
     clls_100 = core.PhaseCellsLogLikelihood(cells_100)
     clls_1000 = core.PhaseCellsLogLikelihood(cells_1000)
 
-    rvals_100 = clls_100.get_lightcurve(tsmin=9,plot_phase=True)
-    rvalsbb_1000 = clls_1000.get_bb_lightcurve(tsmin=9,plot_phase=True,
-            bb_prior=10)
+    rvals_raw_100 = clls_100.get_raw_lightcurve(tsmin=9)
+    rvals_bb_1000 = clls_1000.get_bb_lightcurve(tsmin=9,bb_prior=10)
 
     pl.close(fignum)
     pl.figure(fignum,(4,4)); pl.clf()
     pl.subplots_adjust(hspace=0,bottom=0.14,top=0.98,left=0.16,right=0.96)
     ax1 = pl.subplot(1,1,1)
 
-
     # plot the bin values as blue points
-    ul_mask = (rvals_100[:,-1] == -1) & (~np.isnan(rvals_100[:,-1]))
-    t = rvals_100[ul_mask].transpose()
-    ax1.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C0',alpha=0.8,ls=' ',ms=3)
-    t = rvals_100[~ul_mask].transpose()
-    ax1.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='s',color='C0',alpha=0.8,ls=' ',ms=3)
+    core.plot_raw_lc(rvals_raw_100,ax1,ul_color='C0',alpha=0.8)
 
     # plot the BB values as red points
-    ul_mask = (rvalsbb_1000[:,-1] == -1) & (~np.isnan(rvalsbb_1000[:,-1]))
-    t = rvalsbb_1000[ul_mask].transpose()
-    ax1.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C3',alpha=0.8,ls=' ',ms=3)
-    t = rvalsbb_1000[~ul_mask].transpose()
-    ax1.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',color='C3',alpha=0.8,ls=' ',ms=3)
+    core.plot_bb_lc(rvals_bb_1000,ax1)
 
     ax1.axis([0,1,-0.2,12.5])
     ax1.set_xticks(np.linspace(0,1,6))
@@ -415,36 +376,20 @@ def make_j1231_pulse_profile(fignum=4):
     ax2 = pl.axes([0.28,0.55,0.50,0.40])
 
     # plot the bin values as blue points
-    ul_mask = (rvals_100[:,-1] == -1) & (~np.isnan(rvals_100[:,-1]))
-    t = rvals_100[ul_mask].transpose()
-    ax2.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C0',alpha=0.8,ls=' ',ms=3)
-    t = rvals_100[~ul_mask].transpose()
-    ax2.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='s',color='C0',alpha=0.8,ls=' ',ms=3)
+    core.plot_raw_lc(rvals_raw_100,ax2,ul_color='C0',alpha=0.8)
 
     # plot the BB values as red points
-    ul_mask = (rvalsbb_1000[:,-1] == -1) & (~np.isnan(rvalsbb_1000[:,-1]))
-    t = rvalsbb_1000[ul_mask].transpose()
-    ax2.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,color='C3',alpha=0.8,ls=' ',ms=3)
-    t = rvalsbb_1000[~ul_mask].transpose()
-    ax2.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',color='C3',alpha=0.8,ls=' ',ms=3)
+    core.plot_bb_lc(rvals_bb_1000,ax2)
 
     ax2.axis([0,1,-0.05,0.4])
     ax2.set_xticks(np.linspace(0,1,6))
+    ax2.set_ylabel('')
 
 # THIS IS FIGURE 6
-def make_geminga_power_spectrum(fignum=7):
-    # NOTES
-    # relative to an earlier data set stopping at 58183, the power in the
-    # fixed-background at 1 year is a bit higher, and the power in the free-
-    # background at 53 d is much higher (34 vs. 23).  I thought this was
-    # due to the addition of post-SADA failure data and the much less
-    # homogeneous exposure variation, but it turns out it was actually due
-    # to differences in weights with pointlike sky models.  The FL8Y
-    # version, however, is consistent.  TODO is a more general study of
-    # the dependence of the low-frequency noise on the sky model.
+def make_geminga_power_spectrum(data=None,fignum=7):
 
-
-    data = get_data('j0633',clobber=False)
+    if data is None:
+        data = get_data('j0633',clobber=False)
     ts = data.get_cells(tcell=300,time_series_only=True,
             trim_zero_exposure=False,use_barycenter=True)
     f,window = core.power_spectrum_fft(ts,exp_only=True)
@@ -460,7 +405,7 @@ def make_geminga_power_spectrum(fignum=7):
     dlogl_nobg_s = np.sort(dlogl_nobg[1:])
     cdf = np.arange(1,len(dlogl_s)+1).astype(float)/len(dlogl_s)
     # PSD has oversampled frequencies, use a rough estimate of sample size
-    n_eff = ts.exp > 30000
+    n_eff = np.sum(ts.exp > 30000)
     ax1.plot(dlogl_s,n_eff*(cdf-chi2.cdf(dlogl_s,2)),color='C0')
     ax1.plot(dlogl_nobg_s,n_eff*(cdf-chi2.cdf(dlogl_nobg_s,2)),color='C1')
     from scipy.stats import kstwobign
@@ -541,9 +486,10 @@ def make_geminga_power_spectrum(fignum=7):
     ia.set_yticklabels('')
 
 # THIS IS FIGURE 7
-def make_j0823_power_spectrum(fignum=8):
+def make_j0823_power_spectrum(data=None,fignum=8):
 
-    data = get_data('j0823',clobber=False)
+    if data is None:
+        data = get_data('j0823',clobber=False)
     ts = data.get_cells(tcell=300,time_series_only=True,
             trim_zero_exposure=False,use_barycenter=True)
     f,dlogl_nobg,dlogl,dlogl_null = core.power_spectrum_fft(ts)
@@ -584,9 +530,10 @@ def make_j0823_power_spectrum(fignum=8):
     pl.sca(ax1)
 
 # THIS IS FIGURE 8
-def make_ls5039_power_spectrum(fignum=10):
+def make_ls5039_power_spectrum(data=None,fignum=10):
 
-    data = get_data('ls5039',clobber=False)
+    if data is None:
+        data = get_data('ls5039',clobber=False)
     if (data.max_radius is not None) and (data.max_radius < 10):
         data = get_data('ls5039',clobber=True,max_radius=10)
 
@@ -708,9 +655,10 @@ def make_ls5039_power_spectrum(fignum=10):
     ax3.set_xlabel('Frequency (cycles d$^{-1}$)')
     #ia.set_yticklabels('')
 
-def make_ls5039_power_comparison(fignum=11):
+def make_ls5039_power_comparison(data=None,fignum=11):
 
-    data = get_data('ls5039',clobber=False)
+    if data is None:
+        data = get_data('ls5039',clobber=False)
     if (data.max_radius is not None) and (data.max_radius < 10):
         data = get_data('ls5039',clobber=True,max_radius=10)
 
@@ -780,10 +728,11 @@ def plot_ls5039_aperture_dependence(fignum=12):
     pl.legend(loc='center right',frameon=False)
 
 # THIS IS FIGURE 10
-def make_cygx3_plot(fignum=13):
+def make_cygx3_plot(data=None,fignum=13):
     p0 = 0.199693736062
     forb = 1./p0
-    data = get_data('cygx3',clobber=False)
+    if data is None:
+        data = get_data('cygx3',clobber=False)
     cells = data.get_cells(tcell=86400*14,use_barycenter=False)
     clls = core.CellsLogLikelihood(cells,profile_background=True)
 
@@ -794,16 +743,23 @@ def make_cygx3_plot(fignum=13):
     ax1 = pl.subplot(1,3,1)
 
     # disable upper limits -- want best estimates of flux density
-    r1,r2 = clls.plot_cells_bb(bb_prior=8,tsmin=-1,ax=ax1)
+    raw_lc = clls.get_raw_lightcurve(tsmin=-1)
+    bb_lc = clls.get_bb_lightcurve(tsmin=-1,bb_prior=8)
+
+    core.plot_raw_lc(raw_lc,ax1,meas_color='C0',ul_color='C0')
+    core.plot_bb_lc(bb_lc,ax1)
     ax1.axis([54450,58750,-1,30])
     ax1.set_xticks([55500,56600,57700])
     ax1.set_ylabel("Relative Flux / Power")
 
-    left_edges = r2[:,0]-r2[:,1]
-    right_edges = r2[:,0]+r2[:,1]
+    x,xerr,y,yerrhi,yerrlo,ts = bb_lc.T
+    left_edges = x - xerr
+    right_edges = x + xerr
     edges = mjd2met(np.append(left_edges,right_edges[-1]))
-    scales = r2[:,2]
-    ts = data.get_cells(tcell=600,time_series_only=True,trim_zero_exposure=False,scale_series=[edges,scales])
+    scales = y
+
+    src_scaler = PiecewiseScaler(left_edges,right_edges,scales)
+    ts = data.get_cells(tcell=600,time_series_only=True,trim_zero_exposure=False,src_scaler=src_scaler)
 
     # power spectrum with re-scaled data
     f,dlogl_nobg,dlogl,dlogl_null = core.power_spectrum_fft(ts)
@@ -869,7 +825,8 @@ set_rcParams()
 
 def make_crab_pulse_plot(fignum=4):
 
-    data = core.PhaseData(['data/J0534+2200_topo.fits'],'PSRJ0534+2200')
+    data = core.PhaseData([f'{data_path}/J0534+2200_topo.fits'],
+        'PSRJ0534+2200')
 
     cells_100 = data.get_cells(100)
     cells_1000 = data.get_cells(1000)

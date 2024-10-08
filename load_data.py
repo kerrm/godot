@@ -4,12 +4,12 @@ from astropy.io import fits
 
 from . import core
 
-data_path = '/data/kerrm/photon_data'
+data_path = '/tank/kerrm/fermi_data/godot_test_data'
 
 def get_position_from_ft1(ft1file):
 
     f = fits.open(ft1file)
-    for i in xrange(10):
+    for i in range(10):
         key = 'DSVAL%d'%(i+1)
         try:
             ra,dec,rad = f[1]._header[key].lstrip('CIRCLE(').rstrip(')').split(',')

@@ -1292,16 +1292,28 @@ class CellsLogLikelihood(object):
         else:
             return sum((cll.log_likelihood(a) for cll,a in zip(self.clls,alpha)))
 
-    def get_lightcurve(self,tsmin=4,plot_years=False,plot_phase=False,
-            get_ts=False):
+    def get_raw_lightcurve(self,tsmin=4):
         """ Return a flux density light curve for the raw cells.
+
+        Parameters
+        ----------
+        tsmin : minimum TS for returning uncertainty inteval or upper limit
+
+        Returns
+        -------
+        time, terr, yval, yerrlo, yerrhi, TS
+            time = MJD of the mid-time of the cell (or phase if phase)
+            terr = width of the cell in days (or phase if phase)
+            yval = fractional flux of the cell
+            yerrlo = lower 1-sigma error (or upper limit)
+            yerrhi = upper 1-sigma error (-1 if upper limit)
+            TS = test statistic for cell
         """
 
-        plot_phase = plot_phase or isinstance(self,PhaseCellsLogLikelihood)
+        plot_phase = isinstance(self,PhaseCellsLogLikelihood)
 
-        # time, terr, yval, yerrlo,yerrhi; yerrhi=-1 if upper limit
-        rvals = np.empty([len(self.clls),5])
-        all_ts = np.empty(len(self.clls))
+        rvals = np.empty([len(self.clls),6])
+
         for icll,cll in enumerate(self.clls):
             if cll.S==0:
                 rvals[icll] = np.nan
@@ -1311,172 +1323,45 @@ class CellsLogLikelihood(object):
             else:
                 terr = (tmid-cll.cell.tstart)/86400
                 tmid = met2mjd(tmid)
-                if plot_years:
-                    tmid = (tmid-54832)/365 + 2009 
-                    terr *= 1./365
-            aopt,ts,xconf = self.get_flux(icll,conf=[0.16,0.84])
+                #if plot_years:
+                #    tmid = (tmid-54832)/365 + 2009 
+                #    terr *= 1./365
+            aopt,ts,xconf = self.get_flux(icll,conf=[0.159,0.841])
             ul = ts <= tsmin
             if ul:
-                rvals[icll] = tmid,terr,xconf[1],0,-1
+                rvals[icll] = tmid,terr,xconf[1],0,-1,ts
             else:
-                rvals[icll] = tmid,terr,aopt,aopt-xconf[0],xconf[1]-aopt
-            all_ts[icll] = ts
+                rvals[icll] = tmid,terr,aopt,aopt-xconf[0],xconf[1]-aopt,ts
 
-        if get_ts:
-            return rvals,all_ts
         return rvals
 
-    def plot_cells_bb(self,tsmin=4,fignum=2,clear=True,color='C3',
-            plot_raw_cells=True,bb_prior=4,plot_years=False,
-            no_bb=False,no_ts=True,log_scale=False,
-            plot_phase=False,ax=None,labelsize='large',get_indices=False):
-        """ Generate a plot showing fluxes both from the raw cells and from
-            a Bayesian blocks partition which is computed using the input
-            prior.
+    def get_bb_lightcurve(self,tsmin=4,bb_prior=8,get_indices=False):
+        """ Perform a BB analysis and return the resulting light curve.
 
-            Parameters:
-            tsmin -- plot upper limits if cells/partition TS is <tsmin
-            fignum -- matplotlib figure number to use
-            clear -- clear previous matplotlib figure
-            color -- [WARNING -- NOT USED?]
-            plot_raw_cells -- if False, do not plot underyling  fluxes
-            bb_prior -- exponential prior for BB algorithm
-            plot_years -- if True, scale data to years; default is days
-            no_bb -- do not run/plot/return Bayesian Blocks results
-            no_ts -- do not include TS values in return
-            log_scale -- set y-axis scale to log
-            plot_phase -- interpret times as phase [0,1) instead
-            ax -- use provided instance to plot on
+        Parameters
+        ----------
+        tsmin : minimum TS for returning uncertainty inteval or upper limit
+        bb_prior : the exponential prior parameter for the BB algorithm
+        get_indices : optionally return the indices of the raw cells for
+            the BB partition boundaries
+
+        Returns
+        -------
+        time, terr, yval, yerrlo, yerrhi, TS
+            time = MJD of the mid-time of the cell (or phase if phase)
+            terr = width of the cell in days (or phase if phase)
+            yval = fractional flux of the cell
+            yerrlo = lower 1-sigma error (or upper limit)
+            yerrhi = upper 1-sigma error (-1 if upper limit)
+            TS = test statistic for cell
         """
 
-        # NB might want to use a CellsLogLikelihood to avoid overhead of 3x
-        # size on BB computation
-        plot_phase = plot_phase or isinstance(self,PhaseCellsLogLikelihood)
+        plot_phase = isinstance(self,PhaseCellsLogLikelihood)
 
-        if ax is None:
-            pl.figure(fignum)
-            if clear:
-                pl.clf()
-            ax = pl.gca()
-
-        if log_scale:
-            ax.set_yscale('log')
-        if plot_raw_cells:
-            # time, terr, yval, yerrlo,yerrhi; yerrhi=-1 if upper limit
-            rvals = np.empty([len(self.clls),5 if no_ts else 6])
-            for icll,cll in enumerate(self.clls):
-                if cll.S==0:
-                    rvals[icll] = np.nan
-                tmid = cll.cell.get_tmid()
-                if plot_phase:
-                    terr = (tmid-cll.cell.tstart)
-                else:
-                    terr = (tmid-cll.cell.tstart)/86400
-                    tmid = met2mjd(tmid)
-                    if plot_years:
-                        tmid = (tmid-54832)/365 + 2009 
-                        terr *= 1./365
-                aopt,ts,xconf = self.get_flux(icll,conf=[0.16,0.84])
-                if ts <= tsmin:
-                    if no_ts:
-                        rvals[icll] = tmid,terr,xconf[1],0,-1
-                    else:
-                        rvals[icll] = tmid,terr,xconf[1],0,-1,ts
-                else:
-                    if no_ts:
-                        rvals[icll] = tmid,terr,aopt,aopt-xconf[0],xconf[1]-aopt
-                    else:
-                        rvals[icll] = tmid,terr,aopt,aopt-xconf[0],xconf[1]-aopt,ts
-            ul_mask = (rvals[:,-1] == -1) & (~np.isnan(rvals[:,-1]))
-            t = rvals[ul_mask].transpose()
-            ax.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,
-                    marker=None,color='C0',alpha=0.2,ls=' ',ms=3)
-            t = rvals[~ul_mask].transpose()
-            # if the user has selected a very small tsmin, it is possible
-            # that aopt will be to the "left" of the confidence interval,
-            # giving a negative error, which will make matplotlib unhappy
-            loerr = t[3]
-            loerr[loerr < 0] = t[2][loerr < 0]
-            ax.errorbar(t[0],t[2],xerr=t[1],yerr=[loerr,t[4]],marker='o',
-                    color='C0',alpha=0.2,ls=' ',ms=3)
-        else:
-            rvals = None
-
-        # now, do same for Bayesian blocks
-        if not no_bb:
-            bb_idx,bb_ts,var_ts,var_dof,fitness = self.do_bb(prior=bb_prior)
-            if var_dof == 0:
-                print('Variability significance: no segments')
-            else:
-                print(f'Variability significance: {chi2.sf(var_ts,var_dof):4.2g}')
-            bb_idx = np.append(bb_idx,len(self.cells))
-            rvals_bb = np.empty([len(bb_idx)-1,5 if no_ts else 6])
-            for ibb,(start,stop) in enumerate(zip(bb_idx[:-1],bb_idx[1:])):
-                cells = cell_from_cells(self.cells[start:stop])
-                cll = CellLogLikelihood(cells,swap=self._swap)
-                if cll.S==0:
-                    rvals_bb[ibb] = np.nan
-                    continue
-                tmid = cll.cell.get_tmid()
-                if plot_phase:
-                    terr = (tmid-cll.cell.tstart)
-                else:
-                    terr = (tmid-cll.cell.tstart)/86400
-                    tmid = met2mjd(tmid)
-                    if plot_years:
-                        tmid = (tmid-54832)/365 + 2009 
-                        terr *= 1./365
-                aopt,ts,xconf = cll.get_flux(conf=[0.16,0.84],
-                        profile_background=self.profile_background)
-                if ts <= tsmin:
-                    if no_ts:
-                        rvals_bb[ibb] = tmid,terr,xconf[1],0,-1
-                    else:
-                        rvals_bb[ibb] = tmid,terr,xconf[1],0,-1,ts
-                else:
-                    if no_ts:
-                        rvals_bb[ibb] = tmid,terr,aopt,aopt-xconf[0],xconf[1]-aopt
-                    else:
-                        rvals_bb[ibb] = tmid,terr,aopt,aopt-xconf[0],xconf[1]-aopt,ts
-
-            ul_mask = (rvals_bb[:,-1] == -1) & (~np.isnan(rvals_bb[:,-1]))
-            t = rvals_bb[ul_mask].transpose()
-            ax.errorbar(t[0],t[2],xerr=t[1],yerr=0.1*t[2],uplims=True,marker=None,
-                    color='C3',alpha=0.8,ls=' ',ms=3)
-            t = rvals_bb[~ul_mask].transpose()
-            # In principle a reasonable TSmin cut will keep the yerrors
-            # from becoming negative, but enforce positive anyway
-            yloerr = t[3].copy()
-            yloerr[yloerr < 0] = t[2][yloerr < 0]
-            ax.errorbar(t[0],t[2],xerr=t[1],yerr=[yloerr,t[4]],marker='o',color='C3',
-                    alpha=0.8,ls=' ',ms=3)
-        else:
-            rvals_bb=None
-
-        if plot_phase:
-            ax.set_xlabel('Pulse Phase',size=labelsize)
-            ax.axis([0,1,pl.axis()[2],pl.axis()[3]])
-        elif plot_years:
-            ax.set_xlabel('Year',size=labelsize)
-        else:
-            ax.set_xlabel('MJD',size=labelsize)
-        ax.set_ylabel('Relative Flux Density',size=labelsize)
-        if get_indices:
-            return rvals,rvals_bb,bb_idx
-        return rvals,rvals_bb
-
-    def get_bb_lightcurve(self,tsmin=4,plot_years=False,plot_phase=False,
-            bb_prior=8,get_indices=False):
-        """ Return a flux density light curve for the raw cells.
-        """
-
-        plot_phase = plot_phase or isinstance(self,PhaseCellsLogLikelihood)
-
-        # now, do same for Bayesian blocks
         bb_idx,bb_ts,var_ts,var_dof,fitness = self.do_bb(prior=bb_prior)
-        print('Variability significance: ',chi2.sf(var_ts,var_dof))
+        #print('Variability significance: ',chi2.sf(var_ts,var_dof))
         bb_idx = np.append(bb_idx,len(self.cells))
-        rvals_bb = np.empty([len(bb_idx)-1,5])
+        rvals_bb = np.empty([len(bb_idx)-1,6])
         for ibb,(start,stop) in enumerate(zip(bb_idx[:-1],bb_idx[1:])):
             cells = cell_from_cells(self.cells[start:stop])
             cll = CellLogLikelihood(cells,swap=self._swap)
@@ -1489,15 +1374,15 @@ class CellsLogLikelihood(object):
             else:
                 terr = (tmid-cll.cell.tstart)/86400
                 tmid = met2mjd(tmid)
-                if plot_years:
-                    tmid = (tmid-54832)/365 + 2009 
-                    terr *= 1./365
+                #if plot_years:
+                    #tmid = (tmid-54832)/365 + 2009 
+                    #terr *= 1./365
             aopt,ts,xconf = cll.get_flux(conf=[0.16,0.84],
                     profile_background=self.profile_background)
             if ts <= tsmin:
-                rvals_bb[ibb] = tmid,terr,xconf[1],0,-1
+                rvals_bb[ibb] = tmid,terr,xconf[1],0,-1,ts
             else:
-                rvals_bb[ibb] = tmid,terr,aopt,aopt-xconf[0],xconf[1]-aopt
+                rvals_bb[ibb] = tmid,terr,aopt,aopt-xconf[0],xconf[1]-aopt,ts
 
         if get_indices:
             return rvals_bb,bb_idx
@@ -1777,8 +1662,9 @@ class Data(object):
                 raise ValueError(f'Data Dec values are not consistent: {de0:.5f} != {de1:.5f}')
             if not (abs(rad0-rad1) < tol):
                 raise ValueError(f'Data aperture radius values are not consistent: {rad0:.5f} != {rad1:.5f}')
-            if not (evtclass0[0]==evtclass[0] and evtclass0[1]==evtclass[1]):
-                raise ValueError('Event class selection was not consistent.')
+            if (evtclass is not None):
+                if not (evtclass0[0]==evtclass[0] and evtclass0[1]==evtclass[1]):
+                    raise ValueError('Event class selection was not consistent.')
             # raise an error if we've already cut more than requested; if
             # it's the other way around, remove the larger zenith angle
             # cuts later
@@ -1876,6 +1762,13 @@ class Data(object):
         """ Return the three exposures at the given times. These
         are the original source exposure, the (possibly scaled) source
         exposure, and the (possibly scaled) background exposure.
+
+        Returns
+        -------
+        cexp : the exposure
+        csexp : the exposure scaled by S/E (total counts / total exposure)
+        cbexp : the exposure scaled by B/E (total bkg / total exposure)
+        cdead : the deadtime (possibly None)
         """
 
         TSTART,TSTOP = self.TSTART,self.TSTOP
@@ -2288,8 +2181,8 @@ class Data(object):
         Ideally this would be merged with the more general method.
         """
 
-        exp = self.get_exposure(tstops)-self.get_exposure(tstarts) 
-        exp *= self.S/self.E
+        exp = self.get_exposure(tstops)[1]-self.get_exposure(tstarts)[1]
+        #exp *= self.S/self.E
         start_idx = np.searchsorted(self.ti,tstarts)
         stop_idx = np.searchsorted(self.ti,tstops)
         if randomize:
@@ -2392,15 +2285,13 @@ class Data(object):
         self.bexposure = bexp
 
 
-
-
 class PhaseData(Data):
     """ Use phase instead of time, and ignore exposure.
     """
 
     def __init__(self,ft1files,weight_col,max_radius=None,
             pulse_phase_col='PULSE_PHASE',phase_shift=None,
-            ra=None,dec=None):
+            ra=None,dec=None,verbosity=1):
         """ The FT1 files
             ra, dec of source (deg)
             max_radius -- maximum photon separation from source [deg]
@@ -2411,10 +2302,10 @@ class PhaseData(Data):
         self.dec = dec
         if (max_radius is not None) and ((ra or dec) is None):
             raise ValueError('Must specify ra and dec for radius cut!')
+        self._verbosity = verbosity
 
         data = self._load_photons(ft1files,weight_col,None,None,
                 max_radius=max_radius,time_col=pulse_phase_col)[0]
-        
 
         if phase_shift is not None:
             ph = data[0]
@@ -2429,6 +2320,7 @@ class PhaseData(Data):
         self.E = 1
         self.S = np.sum(self.we)
         self.B = len(self.we)-self.S
+
 
 
     def get_cells(self,ncell=100,get_converse=False,randomize=False,seed=None):
@@ -2674,7 +2566,7 @@ def power_spectrum_dft(cll,freqs,unweighted=False):
 
 def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
         exp_only=False,get_amps=False,exposure_correction=None,
-        no_zero_pad=False):
+        no_zero_pad=False,maxN=None):
     """ Use FFT to evalute the sums in the maximum likelihood expression.
 
     This version matches the notation in the paper.
@@ -2721,6 +2613,14 @@ def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
     B = cells.bexp
     if tweak_exp:
         B = B*Wb.sum()/B.sum()
+
+    if maxN is not None:
+        W = W[:maxN]
+        WW = WW[:maxN]
+        Wb = Wb[:maxN]
+        WbWb = WbWb[:maxN]
+        S = S[:maxN]
+        B = B[:maxN]
 
     if exp_only:
         # this will cause the primary FFT to be of the exposure (with mean
@@ -2792,7 +2692,8 @@ def power_spectrum_fft(timeseries,dfgoal=None,tweak_exp=False,
     beta_sin = (WW_sin*WbmB_sin-WWb_sin*WmS_sin)*denom_sin
 
     if get_amps:
-        return freqs[:(l//4+1)],alpha_cos0,alpha_sin0,WW_cos,WW_sin
+        #return freqs[:(l//4+1)],alpha_cos0,alpha_sin0,WW_cos,WW_sin
+        return freqs[:(l//4+1)],alpha_cos,alpha_sin,beta_cos,beta_sin,alpha_cos0,alpha_sin0,beta_cos0,beta_sin0
 
     # for all estimators, the second order correction simply removes half
     # of the value, so that multiplying by 2 gets you back to Leahy.  So
@@ -2928,29 +2829,72 @@ def get_orbital_modulation(ts,freqs):
 
     return rvals,pows*ts.sexp.sum()**2/ts.sexp.shape[0]
 
-def plot_clls_lc(rvals,ax=None,scale='linear',min_mjd=None,max_mjd=None,
-        ul_color='C1',meas_color='C0'):
-    """ Make a plot of the output of CellsLogLikelihood.get_lightcurve.
+def plot_raw_lc(rvals,ax=None,scale='linear',min_mjd=None,max_mjd=None,
+        ul_color='C1',meas_color='C0',alpha=0.3,ls=' ',ms=3,
+        labelsize='large'):
+    """ Make a plot of the output of CellsLogLikelihood.get_raw_lightcurve.
 
-    rvals is (N,5) array, with each entry being
-        MJDs MJD bin width, flux/alpha, flux_er_lo/uplim, flux_err_hi
+    rvals is (N,6) array, with each entry being
+        MJDs MJD bin width, flux/alpha, flux_er_lo/uplim, flux_err_hi, TS
 
     If the entry is an upper limit, flux_err_hi == -1.
     """
+
     if min_mjd is not None:
         mask = rvals[:,0] >= min_mjd
         rvals = rvals[mask,:]
+
     if max_mjd is not None:
         mask = rvals[:,0] <= max_mjd
         rvals = rvals[mask,:]
+
     if ax is None:
         ax = pl.gca()
     ax.set_yscale(scale)
-    ul_mask = (rvals[:,-1] == -1) & (~np.isnan(rvals[:,-1]))
-    t = rvals[ul_mask].transpose()
-    ax.errorbar(t[0],t[2],xerr=t[1],yerr=0.2*(1 if scale=='linear' else t[2]),uplims=True,marker=None,color=ul_color,alpha=0.5,ls=' ',ms=3)
-    t = rvals[~ul_mask].transpose()
-    ax.errorbar(t[0],t[2],xerr=t[1],yerr=[t[3],t[4]],marker='o',color=meas_color,alpha=0.5,ls=' ',ms=3)
-    ax.set_xlabel('MJD')
-    ax.set_ylabel('Relative Flux')
 
+    x,xerr,y,yerrlo,yerrhi,ts = rvals.transpose()
+    ul_mask = (yerrhi == -1) & (~np.isnan(yerrhi))
+
+    # TODO -- obviously shouldn't have negative values, so need to fix that
+    # I guess this is from cases where the confidence limit can't be
+    # satisfied.
+    yerrlo[yerrlo <= 0] = y[yerrlo <= 0]
+
+    # Plot the upper limits
+    x,xerr,y,yerrlo,yerrhi,ts = rvals[ul_mask].transpose()
+    ax.errorbar(x=x,y=y,xerr=xerr,
+            yerr=0.2*(1 if scale=='linear' else y),
+            uplims=True,marker=None,color=ul_color,alpha=alpha,ls=ls,ms=ms)
+
+    # Plot the measurements
+    x,xerr,y,yerrlo,yerrhi,ts = rvals[~ul_mask].transpose()
+    ax.errorbar(x=x,y=y,xerr=xerr,yerr=[yerrlo,yerrhi],
+            marker='o',color=meas_color,alpha=alpha,ls=ls,ms=ms)
+
+    ax.set_xlabel('MJD',size=labelsize)
+    ax.set_ylabel('Relative Flux',size=labelsize)
+
+def plot_bb_lc(rvals,ax=None,scale='linear',min_mjd=None,max_mjd=None,
+        ul_color='C3',meas_color='C3',alpha=0.8,ls=' ',ms=3,
+        labelsize='large'):
+    """ Make a plot of the output of CellsLogLikelihood.get_bb_lightcurve.
+
+    rvals is (N,6) array, with each entry being
+        MJDs MJD bin width, flux/alpha, flux_er_lo/uplim, flux_err_hi, TS
+
+    If the entry is an upper limit, flux_err_hi == -1.
+    """
+
+    import inspect
+    sig = inspect.signature(plot_raw_lc)
+    l = locals()
+    args = [l[k] for k in sig.parameters.keys()]
+    plot_raw_lc(*args)
+
+    #plot_raw_lc(rvals,ax=ax,scale=scale,min_mjd=min_mjd,max_mjd=max_mjd,
+    #    ul_color=ul_color,meas_color=meas_color,alpha=alpha,ls=ls,ms=ms)
+
+def plot_both_lc(rvals_raw,rvals_bb,ax=None):
+    """ Make a standard plot with the raw and BB light curves shown."""
+    plot_raw_lc(rvals_raw,ax=ax)
+    plot_bb_lc(rvals_bb,ax=ax)
