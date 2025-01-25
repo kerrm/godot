@@ -3,7 +3,7 @@ from collections import deque
 from astropy.io import fits
 import numpy as np
 import pylab as pl
-from scipy.integrate import simps,cumtrapz
+from scipy.integrate import simpson,cumulative_trapezoid
 from scipy.optimize import fmin,fsolve,fmin_tnc,brentq
 from scipy.interpolate import interp1d
 from scipy.stats import chi2
@@ -110,7 +110,7 @@ def calc_weighted_aeff(pcosines,phi,base_spectrum=None,
             rvals[i] += aeff
         total_exposure[i] = rvals[i].sum()
         rvals[i] *= wt
-    aeff = simps(rvals,edom,axis=0)/simps(wts,edom)
+    aeff = simpson(rvals,edom,axis=0)/simpson(wts,edom)
 
     return aeff,edom,total_exposure
 
@@ -977,7 +977,7 @@ class CellLogLikelihood(object):
         dom,cod = self.get_logpdf(aopt=aopt,dlogl=dlogl,npt=npt,
                 profile_background=profile_background)
         np.exp(cod,out=cod)
-        return dom,cod*(1./simps(cod,x=dom))
+        return dom,cod*(1./simpson(cod,x=dom))
 
     def get_ts(self,aopt=None,profile_background=False):
         if self.S == 0:
@@ -1016,7 +1016,7 @@ class CellLogLikelihood(object):
                 print('failed to obtain agreement, using internal version')
                 aopt = dom[amax]
         ts = self.get_ts(aopt=aopt,profile_background=profile_background)
-        cdf = cumtrapz(cod,dom,initial=0)
+        cdf = cumulative_trapezoid(cod,dom,initial=0)
         cdf *= 1./cdf[-1]
         indices = np.searchsorted(cdf,conf)
         # do a little linear interpolation step here
@@ -1246,8 +1246,8 @@ class CellsLogLikelihood(object):
 
         dom,cod = self._dom[idx],self._cod[idx].copy()
         np.exp(cod,out=cod)
-        cod *= (1./simps(cod,x=dom))
-        cdf = cumtrapz(cod,dom,initial=0)
+        cod *= (1./simpson(cod,x=dom))
+        cdf = cumulative_trapezoid(cod,dom,initial=0)
         cdf *= 1./cdf[-1]
         indices = np.searchsorted(cdf,conf)
         # do a little linear interpolation step here
