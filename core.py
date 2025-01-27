@@ -1413,6 +1413,7 @@ class Data(object):
     def __init__(self,ft1files,ft2files,ra,dec,weight_col,
             zenith_cut=100,theta_cut=0.4,minimum_exposure=3e4,use_phi=True,
             base_spectrum=None,max_radius=None,bary_ft1files=None,
+            emin=None,emax=None,
             tstart=None,tstop=None,
             verbosity=1,correct_efficiency=True,correct_cosines=True,
             correct_psf=True,correct_aeff=False,
@@ -1441,6 +1442,12 @@ class Data(object):
         tstart: cut time to apply to dataset; notionally MET, but will 
             attempt to convert from MJD if < 100,000.
         tstop : as tstart
+        emin : (MeV) energy cuts will typically be taken from the DSS
+            section of the FT1 file.  If specified here, emin must be >=
+            the minimum energy in every DSS specification.
+        emax : (MeV) energy cuts will typically be taken from the DSS
+            section of the FT1 file.  If specified here, emax must be <=
+            the maximum energy in every DSS specification.
         correct_efficiency: apply trigger efficiency (from livetime)
         correct_cosines: apply in-bin S/C attitude correction;  see below
         correct_psf : apply aperture completeness correction
@@ -1480,7 +1487,10 @@ class Data(object):
         # checked for consistency in _load_photons
         rcuts,ecuts,zmax,evtclass = events.parse_dss(
             fits.getheader(ft1files[0],1))
-        emin,emax = ecuts # in MeV
+        if emin is None:
+            emin = ecuts[0]
+        if emax is None:
+            emax = ecuts[1] # in MeV
         
         lt = py_exposure_p8.Livetime(ft2files,ft1files,
                 tstart=tstart,tstop=tstop,verbose=verbosity)
@@ -1533,7 +1543,8 @@ class Data(object):
         data,datacols,self.timeref,_,_ = self._load_photons(
                 ft1files,weight_col,self.TSTART[0],self.TSTOP[-1],
                 max_radius=max_radius,zenith_cut=zenith_cut,
-                type_selector=type_selector)
+                type_selector=type_selector,
+                emin=emin,emax=emax)
         ti = data[0]
         if self.timeref=='SOLARSYSTEM':
             print('WARNING!!!!  Barycentric data not accurately treated')
@@ -1558,7 +1569,8 @@ class Data(object):
             data,datacols,timeref,photon_idx,ecuts = self._load_photons(
                     bary_ft1files,weight_col,
                     None,None,max_radius=max_radius,no_filter=True,
-                    zenith_cut=zenith_cut,type_selector=type_selector)
+                    zenith_cut=zenith_cut,type_selector=type_selector,
+                    emin=emin,emax=emax)
             self.bary_ti = (data[0][photon_idx][event_mask]).copy()
         else:
             self.bary_ti = None
@@ -1614,7 +1626,8 @@ class Data(object):
 
     def _load_photons(self,ft1files,weight_col,tstart,tstop,
             max_radius=None,time_col='time',no_filter=False,
-            zenith_cut=100,type_selector=None):
+            zenith_cut=100,type_selector=None,
+            emin=None,emax=None):
         """ Load events from the FT1 files.
 
         Parameters
@@ -1635,6 +1648,8 @@ class Data(object):
         timeref : the TIMEREF entry of the FT1 files (same for all)
         idx : an array which can be used to sort other FT1 columns
         dss : the DSS selections (same for all)
+        emin : (MeV) optional override for DSS, must be within range
+        emax : (MeV) optional override for DSS, must be within range
         """
 
         cols = [time_col,weight_col,'energy','event_type']
@@ -1645,6 +1660,11 @@ class Data(object):
             hdr = f[1]._header
             rcuts0,ecuts0,zmax0,evtclass0 = dss0 = events.parse_dss(hdr)
             timeref0 = hdr['timeref']
+
+        if (emin is not None) and (emin < ecuts0[0]):
+            raise ValueError('emin out of range')
+        if (emax is not None) and (emax > ecuts0[1]):
+            raise ValueError('emax out of range')
 
         def _check_metadata(hdr,tol=1e-4):
             """ Check for consistency in the DSS keywords, zenith cuts,
@@ -1694,6 +1714,12 @@ class Data(object):
                 zmask = hdu.data['zenith_angle'] <= zenith_cut
                 self._vprint(f'{zmask.sum()}/{nevt} pass zenith cut',2)
                 mask &= zmask
+
+            # requesting an energy cut more stringent than was applied
+            if emin is not None:
+                mask &= hdu.data['energy'] >= emin
+            if emax is not None:
+                mask &= hdu.data['energy'] <= emax
 
             # merge the columns into the cumulative deques
             for c,d in zip(cols,deques):
