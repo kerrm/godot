@@ -1717,9 +1717,14 @@ class Data(object):
 
             # requesting an energy cut more stringent than was applied
             if emin is not None:
-                mask &= hdu.data['energy'] >= emin
+                emask = hdu.data['energy'] >= emin
+                self._vprint(f'{emask.sum()}/{nevt} pass emin cut',2)
+                mask &= emask
+
             if emax is not None:
-                mask &= hdu.data['energy'] <= emax
+                emask = hdu.data['energy'] <= emax
+                self._vprint(f'{emask.sum()}/{nevt} pass emax cut',2)
+                mask &= emask
 
             # merge the columns into the cumulative deques
             for c,d in zip(cols,deques):
