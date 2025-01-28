@@ -693,7 +693,7 @@ class Livetime(object):
         """
         event_idx = np.searchsorted(self.gti_stops,timestamps)
         mask = event_idx < len(self.gti_stops)
-        mask[mask] = timestamps > self.gti_starts[event_idx[mask]]
+        mask[mask] = timestamps[mask] > self.gti_starts[event_idx[mask]]
         if self.verbose >= 1:
             print('gti mask: %d/%d'%(mask.sum(),len(mask)))
         return mask
