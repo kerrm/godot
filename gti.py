@@ -34,14 +34,21 @@ class _Gti():
         return (self._t0[idx] <= t) & (self._t1[idx] > t)
 
     def combine(self,other):
-        if other._t1[-1] <= self._t0[0]:
-            # other is entirely before us
-            self._t0 = np.append(other._t0,self._t0)
-            self._t1 = np.append(other._t1,self._t1)
-        elif other._t0[0] >= self._t1[-1]:
+        st0,st1 = self._t0,self._t1
+        ot0,ot1 = other._t0,other._t1
+        if ot1[-1] <= st0[0]: # other is entirely before self
+            if ot1[-1] == st0[0]: # the boundary GTI is contiguous, combine
+                ot1 = ot1[:-1]
+                st0 = st0[1:]
+            self._t0 = np.append(ot0,st0)
+            self._t1 = np.append(ot1,st1)
+        elif ot0[0] >= st1[-1]: # other is entirely after self
+            if st1[-1] == ot0[0]: # the boundary GTI is contiguous, combine
+                st1 = st1[:-1]
+                ot0 = ot0[1:]
             # other is entirely after us
-            self._t0 = np.append(self._t0,other._t0)
-            self._t1 = np.append(self._t1,other._t1)
+            self._t0 = np.append(st0,ot0)
+            self._t1 = np.append(st1,ot1)
         else:
             # there is a non-trivial intersection; complete in two steps,
             # truncating any intersecting GTIs such that they don't overlap,
@@ -177,6 +184,14 @@ def test_Gti(get_test_data=False):
     assert(np.all(g3._t1==answer_t1))
     assert(np.allclose(g3.computeOntime(),3.1))
 
+    # test union with contiugous boundary
+    g1 = Gti([0,0.5],[0.2,1.0])
+    g2 = Gti([1.0],[1.5])
+    g1.combine(g2)
+    assert(np.all(g1._t0==np.asarray([0,0.5])))
+    assert(np.all(g1._t1==np.asarray([0.2,1.5])))
+
+    # test non-trivial union
     g1 = Gti(t0,t1)
     g2 = Gti(ot0,ot1)
     g1.combine(g2)
