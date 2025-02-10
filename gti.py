@@ -60,7 +60,7 @@ class _Gti():
             dt = new_t1-new_t0
             new_t0 = new_t0[dt>0]
             new_t1 = new_t1[dt>0]
-            a = np.argsort(new_t1)
+            a = np.argsort(new_t0)
             new_t0 = new_t0[a]
             new_t1 = new_t1[a]
             nt0 = [new_t0[0]]
