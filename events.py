@@ -53,7 +53,7 @@ def load_bitfield(fname,field_name,hdu_name=1):
     """
     with fits.open(fname) as f:
         hdu = f[hdu_name]
-        # change from 32X (or whatver) to unsigned integer
+        # change from 32X (or whatever) to unsigned integer
         c = hdu.columns[field_name]
         old_format = c.format
         c.format = _ColumnFormat('J')
@@ -83,11 +83,11 @@ def event_type_to_fb_type(et):
     assert(not np.any(types < 0))
     return types
 
-def load_psf_type(hdu):
+def load_psf_type(fname):
     """ Load the EVENT_TYPE bitmask and convert it into an integer array
         whose entries are the PSF types (0-3).
     """
-    dat = load_bitfield(hdu,'EVENT_TYPE')
+    dat = load_bitfield(fname,'EVENT_TYPE')
     return event_type_to_psf_type(dat)
 
 def radius_cut(hdu,ra0,dec0,max_radius):
